@@ -15,6 +15,8 @@ var kills := 0
 var _hitmarker_time := 0.0
 var _hitmarker_color := Color.WHITE
 var _frame_times: Array[float] = []
+## Extra line(s) about the AimBridge, set by the scene root.
+var bridge_text := ""
 
 
 func _ready() -> void:
@@ -36,6 +38,8 @@ func _process(delta: float) -> void:
 	var accuracy := 100.0 * hits / shots if shots > 0 else 0.0
 	stats_label.text = "%d FPS  (%.1f ms)\nShots %d  Hits %d  (%.0f%%)\nHeadshots %d  Kills %d" % [
 		Engine.get_frames_per_second(), avg * 1000.0, shots, hits, accuracy, headshots, kills]
+	if bridge_text != "":
+		stats_label.text += "\n" + bridge_text
 
 
 func set_mouse_captured(captured: bool) -> void:
