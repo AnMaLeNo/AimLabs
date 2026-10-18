@@ -1,0 +1,8 @@
+Model Information:
+* title:	VALORANT Weapon Vandal Rifle
+* source:	https://sketchfab.com/3d-models/valorant-weapon-vandal-rifle-06ee30c3779942c1a43e8b644127da93
+* author:	零宽不连字 (https://sketchfab.com/LkblZ)
+
+Model License:
+* license type:	SKETCHFAB Standard (https://sketchfab.com/licenses)
+* requirements:	Under basic restrictions, use worldwide, on all types of media, commercially or not, and in all types of derivative works

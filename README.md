@@ -56,6 +56,7 @@ game/
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
   scripts/game.gd        câblage + options --smoke-test / --screenshot
   assets/characters/     Kenney « Blocky Characters » (CC0)
+  assets/weapons/vandal/   « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt)
 ```
 
 Couches physiques : 1 `world`, 2 `player`, 3 `enemy_body`, 4 `enemy_head`.
