@@ -21,6 +21,9 @@ var bridge_text := ""
 
 func _ready() -> void:
 	crosshair.draw.connect(_draw_crosshair)
+	overlay_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	overlay_label.offset_bottom = -16.0
+	overlay_label.add_theme_font_size_override("font_size", 14)
 	set_mouse_captured(false)
 
 
@@ -46,7 +49,7 @@ func set_mouse_captured(captured: bool) -> void:
 	overlay.visible = not captured
 	hint_label.visible = captured
 	if not captured:
-		overlay_label.text = "AimLabs\n\nClick to play\n\nWASD move · Shift sprint · Space jump\nLeft click shoot · T reset targets · Esc release mouse"
+		overlay_label.text = "WASD move · Shift sprint · Space jump · Left click shoot · T reset targets · Esc menu"
 
 
 func on_shot_fired(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> void:

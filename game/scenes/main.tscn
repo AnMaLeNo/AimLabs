@@ -1,9 +1,10 @@
-[gd_scene load_steps=5 format=3 uid="uid://b1aimlabsmain"]
+[gd_scene load_steps=6 format=3 uid="uid://b1aimlabsmain"]
 
 [ext_resource type="Script" path="res://scripts/game.gd" id="1_game"]
 [ext_resource type="Script" path="res://scripts/world.gd" id="2_world"]
 [ext_resource type="PackedScene" path="res://scenes/player.tscn" id="3_player"]
 [ext_resource type="Script" path="res://scripts/hud.gd" id="4_hud"]
+[ext_resource type="Script" path="res://scripts/algo_menu.gd" id="5_menu"]
 
 [node name="Main" type="Node"]
 script = ExtResource("1_game")
@@ -53,7 +54,7 @@ theme_override_colors/font_color = Color(1, 1, 1, 0.75)
 theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
 theme_override_constants/outline_size = 3
 theme_override_font_sizes/font_size = 13
-text = "WASD move · Shift sprint · Space jump · Left click shoot · T reset targets · Esc release mouse"
+text = "WASD move · Shift sprint · Space jump · Left click shoot · T reset targets · Esc menu"
 horizontal_alignment = 1
 
 [node name="PauseOverlay" type="ColorRect" parent="HUD"]
@@ -77,3 +78,17 @@ theme_override_font_sizes/font_size = 24
 text = "Click to play"
 horizontal_alignment = 1
 vertical_alignment = 1
+
+[node name="AlgoMenu" type="PanelContainer" parent="HUD"]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -400.0
+offset_top = -250.0
+offset_right = 400.0
+offset_bottom = 250.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("5_menu")

@@ -30,7 +30,7 @@ godot --path game
 Sans GPU (VM, CI) : `godot --path game --rendering-method gl_compatibility`.
 
 Commandes : WASD déplacer · Shift sprint · Espace saut · clic gauche tirer ·
-T réinitialiser les cibles · Échap libérer / clic recapturer la souris.
+T réinitialiser les cibles · Échap menu des algos (libère la souris) / clic hors du menu pour reprendre.
 
 ## AimBridge (interface pour l'aide à la visée)
 
@@ -61,9 +61,37 @@ with AimClient() as c:                 # s'attache à la mémoire partagée "aim
 * **Modes de jeu** (`-- --mode=<nom>`) : `full` (défaut), `lowres` (image fournie en 640×360),
   `tiny` (320×180), `aim_only` (tir refusé), `fire_only` (visée refusée), `blind` (pas d'image).
   Les commandes refusées sont comptées dans `cmds_dropped`. Définis dans `game/scripts/game.gd`.
-* **Exemples** : `sdk/python/examples/bridge_selftest.py` (test de bout en bout),
-  `skin_bot.py` (bot jouet : masque de pixels « peau », recentre, tire — ~15 % de précision,
-  juste pour prouver la boucle).
+* **Clavier / souris du joueur** : l'état publie les touches enfoncées (keycodes Godot,
+  disposition *et* physiques) et les boutons de souris, pour que la pipeline réagisse aux
+  touches du joueur (modes, réglages, « vise seulement tant que j'appuie »…) :
+
+  ```python
+  k = c.keys()                 # instantané : k.down, k.physical_down, k.mouse_down (frozensets de noms)
+  if "CAPSLOCK" in k.just_pressed: enabled = not enabled    # transitions depuis le keys() précédent
+  if "ALT" in k: ...           # maintenu ; noms : "A".."Z", "0".."9", "SPACE", "SHIFT", "CTRL",
+                               # "ALT", "F1".."F12", "KP_0"…, souris "LEFT"/"RIGHT"/"MIDDLE"/"XBUTTON1"…
+  ```
+
+  L'état est échantillonné à chaque frame du jeu : un appui plus court qu'une frame peut
+  être manqué.
+* **Exemples** : `sdk/python/examples/bridge_selftest.py` (test de bout en bout) et le dossier
+  `algos/` (voir ci-dessous).
+
+### Menu Échap : lancer ses algos sans quitter le jeu
+
+`Échap` ouvre le menu **Algos** : il liste les `*.py` du dossier `algos/` (première ligne de la
+docstring en description), **Lancer / Basculer / Relancer / Arrêter** le process depuis le jeu,
+affiche sa sortie (stdout + stderr, donc les tracebacks) et le statut (en cours / terminé avec
+code), et permet de changer de mode de jeu à chaud. Le jeu lance le script avec `python3`
+(`python` sous Windows, ou `--python=<cmd>` / `AIMLABS_PYTHON`), `PYTHONPATH` sur `sdk/python`
+et `AIMLABS_SHM` sur le segment courant ; il le tue en quittant. L'algo continue de jouer
+pendant que le menu est ouvert (pratique pour lire son log en direct). Options : `--algos=<dossier>`, `--algo=<fichier.py>`
+(lance au démarrage).
+
+* `algos/auto_aim.py` — vise seul la cible la plus proche du réticule : `CAPSLOCK` on/off,
+  `ALT` maintenu = vise tant qu'appuyé, `V` tir auto on/off. Heuristique couleur (pixels
+  « peau »), à remplacer par ta propre vision.
+* `algos/skin_bot.py` — bot jouet toujours actif (vise + tire), juste pour prouver la boucle.
 
 ### Compiler le pont
 
@@ -110,17 +138,21 @@ game/
   scripts/enemy.gd       cible humanoïde : hitboxes tête/corps/bras, PV, respawn
   scripts/world.gd       génération procédurale (seed), lumière, ciel, brouillard
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
-  scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode
+  scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
+  scripts/algo_runner.gd lance/arrête les algos (process + pipes stdout/stderr)
+  scripts/algo_menu.gd   menu Échap : liste, Lancer/Arrêter, log, mode
   assets/characters/     Kenney « Blocky Characters » (CC0)
   bin/                   aimbridge.gdextension + binaires Linux/Windows
 bridge/
-  src/protocol.h         layout de la mémoire partagée (version 1)
+  src/protocol.h         layout de la mémoire partagée (version 2 : + clavier/souris)
   src/aim_bridge.*       nœud AimBridge : capture, thread de publication, commandes, état
   src/shared_memory.*    shm POSIX / file mapping Windows
   godot-cpp/             sous-module (bindings C++, API 4.7)
 sdk/python/
-  aimlabs/client.py      AimClient (frame, state, move, fire)
-  examples/              bridge_selftest.py, skin_bot.py
+  aimlabs/client.py      AimClient (frame, state, keys, move, fire)
+  aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
+  examples/              bridge_selftest.py
+algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py
 ```
 
 Couches physiques : 1 `world`, 2 `player`, 3 `enemy_body`, 4 `enemy_head`.
