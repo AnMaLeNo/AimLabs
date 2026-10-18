@@ -1,0 +1,5 @@
+# Godot
+game/.godot/
+game/export/
+*.import.tmp
+.DS_Store
