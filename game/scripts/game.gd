@@ -22,7 +22,8 @@ extends Node
 ##   --bench-trigger       range: run the trigger benchmark (TriggerBench) then quit; with
 ##                         --algo the algo is started first and the bench waits for it.
 ##   --bench-<key>=<v>     TriggerBench.DEFAULTS keys: distance-start/-step/-max, speed-start/
-##                         -factor/-max, passes, settle, pause; --bench-oracle (fires every frame),
+##                         -min/-max, precision, confirm, width, travel-widths, settle, pause;
+##                         --bench-oracle (fires every frame),
 ##                         --bench-out=<json> (default bench_results/trigger_<algo>_<date>.json),
 ##                         --no-quit (stay in game when done)
 

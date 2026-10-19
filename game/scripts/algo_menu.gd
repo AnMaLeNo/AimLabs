@@ -255,9 +255,9 @@ func _build_map_rows(root: VBoxContainer) -> void:
 	root.add_child(_bench_row)
 	_bench_btn = Button.new()
 	_bench_btn.text = "Benchmark tir auto"
-	_bench_btn.tooltip_text = ("Caméra figée, la cible traverse le réticule de plus en plus vite, 4 passages par vitesse ;\n"
-		+ "quand aucun passage n'est touché la cible est éloignée et on recommence. Mesure l'algo en cours\n"
-		+ "(ou toi, à la souris). Résultat dans le HUD, la console et bench_results/*.json.")
+	_bench_btn.tooltip_text = ("Caméra figée, la cible balaie le réticule sur ± 2 largeurs ; la vitesse limite est trouvée par\n"
+		+ "dichotomie (on double tant que ça touche, puis on resserre à 10 %), confirmée, puis la cible recule\n"
+		+ "de 5 m. Mesure l'algo en cours (ou toi, à la souris). Résultat : HUD, console, bench_results/*.json.")
 	_bench_btn.pressed.connect(func() -> void:
 		if game.bench.running:
 			game.bench.stop()

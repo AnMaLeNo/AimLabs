@@ -59,26 +59,28 @@ des dossiers de `game/assets/ka/agents/` et `weapons/`).
 
 ### Benchmark « tir auto » (reproductible, une commande)
 
-Pour les algos qui **ne font que tirer** (pas de souris) : la caméra est figée droit devant,
-la cible traverse le réticule de gauche à droite ; à chaque distance la vitesse monte palier
-par palier (× 1,25), 4 passages par palier, et quand **aucun** des 4 passages n'est touché la
-cible est éloignée de 5 m et la vitesse repart du début. Fin quand même la vitesse la plus
-lente rate, ou à 40 m. Résultat : vitesse max touchée par distance, dans le HUD, la console
-et `bench_results/trigger_<algo>_<date>.json` (détail tirs / touches / headshots par passage).
+Pour les algos qui **ne font que tirer** (pas de souris) : la caméra est figée droit devant, la
+cible balaie le réticule sur une ligne courte (± 2 largeurs de personnage, aller puis retour).
+À chaque distance la **vitesse limite** est cherchée par dichotomie : départ 2 m/s, on double tant
+qu'une traversée touche, dès qu'une rate on coupe l'intervalle touché/raté en deux jusqu'à 10 %
+de précision, puis 2 traversées de confirmation à la vitesse trouvée. Ensuite la cible recule de
+5 m et la recherche repart ; fin quand plus rien ne touche ou à 40 m (≈ 10 traversées et 15 s par
+distance). Résultat : vitesse limite par distance dans le HUD, la console (`BENCH DONE 5 m : …`)
+et `bench_results/trigger_<algo>_<date>.json` (détail de chaque traversée).
 
 ```bash
 godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py          # lance l'algo, attend sa connexion, mesure, quitte
 godot --path game -- --map=range --bench-trigger --bench-oracle --bridge=off      # référence : tire à chaque frame (plafond de l'arme)
-godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --weapon=spectre --bench-passes=3 --bench-speed-factor=1.5 --no-quit
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --weapon=spectre --bench-precision=0.05 --no-quit
 ```
 
-Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-factor/-max`,
-`--bench-passes`, `--bench-settle`, `--bench-pause`, `--bench-out=<json>`. Depuis le menu Échap
-(map Stand de tir) : bouton **Benchmark tir auto**, qui mesure l'algo en cours — ou toi, à la
-souris, si aucun algo ne tourne. Le mode `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans
-l'environnement de l'algo pour qu'il démarre armé sans CapsLock. Le plafond est fixé par la
-cadence de l'arme (l'oracle rate déjà à 10 m / 4 m/s avec le Classic) : comparer les algos à
-arme égale.
+Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
+`--bench-confirm`, `--bench-width` (largeur de la cible, 1,2 m), `--bench-travel-widths`,
+`--bench-settle`, `--bench-pause`, `--bench-out=<json>`. Depuis le menu Échap (map Stand de tir) :
+bouton **Benchmark tir auto**, qui mesure l'algo en cours — ou toi, à la souris, si aucun algo ne
+tourne. Le mode `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo pour
+qu'il démarre armé sans CapsLock. Le plafond est fixé par la cadence de l'arme (l'oracle parfait
+plafonne vite avec le Classic) : comparer les algos à arme égale.
 
 ## Assets (Kingdom Archives)
 
