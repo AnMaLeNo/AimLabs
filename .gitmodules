@@ -1,0 +1,4 @@
+[submodule "bridge/godot-cpp"]
+	path = bridge/godot-cpp
+	url = https://github.com/godotengine/godot-cpp.git
+	branch = master
