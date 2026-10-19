@@ -22,7 +22,7 @@ signal progress(text: String)
 
 const DEFAULTS := {
 	"distance_start": 5.0, "distance_step": 5.0, "distance_max": 40.0,
-	"speed_start": 2.0, "speed_min": 0.25, "speed_max": 80.0, "precision": 0.1, "confirm": 2,
+	"speed_start": 2.0, "speed_min": 0.25, "speed_max": 150.0, "precision": 0.1, "confirm": 2,
 	"width": 1.2, "travel_widths": 2.0, "heights": "chest", "criterion": "auto",
 	"mark_tolerance": 0.03, "settle": 3.0, "pause": 0.3, "wait_client": false, "oracle": false,
 }
@@ -399,7 +399,7 @@ func build_svg() -> String:
 	var w := float(config["width"])
 	var half := _half_travel if _half_travel > 0.0 else w * 2.0
 	var bar_w := 520.0
-	var x0 := 330.0
+	var x0 := 430.0
 	var row_h := 14.0
 	var rows := []
 	for h in result["heights"]:
@@ -429,7 +429,7 @@ func build_svg() -> String:
 		var lat = sw.get("first_mark_latency_ms")
 		var label := "%.2f m/s %s%s · marques %d/%d · couv. %.0f %%%s" % [float(sw["speed"]), "OK" if ok else "raté",
 			" (conf.)" if sw.get("confirm", false) else "", int(sw["marks_correct"]), int(sw["marks"]), 100.0 * float(sw["coverage"]),
-			(" · 1re marque %.0f ms" % float(lat)) if lat != null else ""]
+			(" · lat. %.0f ms" % float(lat)) if lat != null else ""]
 		out.append('<text x="40" y="%.0f" fill="%s">%s</text>' % [y + 10.0, "#9f9" if ok else "#f99", _esc(label)])
 		out.append('<rect x="%.0f" y="%.0f" width="%.0f" height="%.0f" fill="#333"/>' % [x0, y + 2.0, bar_w, row_h - 4.0])
 		var px := func(local_x: float) -> float: return x0 + (clampf(-local_x, -half, half) + half) / (2.0 * half) * bar_w
