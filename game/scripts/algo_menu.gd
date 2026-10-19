@@ -24,6 +24,9 @@ var _size_box: SpinBox
 var _speed_box: SpinBox
 var _distance_box: SpinBox
 var _range_row: HBoxContainer
+var _bench_row: HBoxContainer
+var _bench_btn: Button
+var _bench_label: Label
 var _bridge_label: Label
 var _log_dirty := true
 
@@ -197,7 +200,8 @@ func _build_map_rows(root: VBoxContainer) -> void:
 	_map_btn.select(1 if world.map == "range" else 0)
 	_map_btn.item_selected.connect(func(i: int) -> void:
 		world.set_map(String(_map_btn.get_item_metadata(i)))
-		_range_row.visible = world.map == "range")
+		_range_row.visible = world.map == "range"
+		_bench_row.visible = world.map == "range")
 	map_row.add_child(_map_btn)
 
 	_range_row = HBoxContainer.new()
@@ -244,6 +248,29 @@ func _build_map_rows(root: VBoxContainer) -> void:
 	_range_row.add_child(dist_label)
 	_distance_box = _spin(2.0, 60.0, 1.0, world.range_distance, func(v: float) -> void: world.set_range_distance(v))
 	_range_row.add_child(_distance_box)
+
+	_bench_row = HBoxContainer.new()
+	_bench_row.add_theme_constant_override("separation", 8)
+	_bench_row.visible = world.map == "range"
+	root.add_child(_bench_row)
+	_bench_btn = Button.new()
+	_bench_btn.text = "Benchmark tir auto"
+	_bench_btn.tooltip_text = ("Caméra figée, la cible traverse le réticule de plus en plus vite, 4 passages par vitesse ;\n"
+		+ "quand aucun passage n'est touché la cible est éloignée et on recommence. Mesure l'algo en cours\n"
+		+ "(ou toi, à la souris). Résultat dans le HUD, la console et bench_results/*.json.")
+	_bench_btn.pressed.connect(func() -> void:
+		if game.bench.running:
+			game.bench.stop()
+		else:
+			game.bench.out_path = AlgoRunner._repo_root().path_join("bench_results/trigger_%s_%s.json" % [
+				runner.current_name() if runner.is_running() else "human",
+				Time.get_datetime_string_from_system().replace(":", "-")])
+			game.bench.start({ "settle": 1.0 })
+			game.player.set_mouse_captured(true))
+	_bench_row.add_child(_bench_btn)
+	_bench_label = Label.new()
+	_bench_label.text = "Lance d'abord l'algo à mesurer, puis le benchmark."
+	_bench_row.add_child(_bench_label)
 
 
 func _spin(min_v: float, max_v: float, step: float, value: float, on_change: Callable) -> SpinBox:
@@ -323,3 +350,7 @@ func _process(_delta: float) -> void:
 	if _log_dirty:
 		_log_dirty = false
 		_log.text = "\n".join(runner.log_lines)
+	if game.bench:
+		_bench_btn.text = "Arrêter le benchmark" if game.bench.running else "Benchmark tir auto"
+		if game.bench.status_text() != "":
+			_bench_label.text = game.bench.status_text()

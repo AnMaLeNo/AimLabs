@@ -19,6 +19,12 @@ extends Node
 ##   --size=<m>            range: travel (line) / side (square) / radius (circle), default 4
 ##   --speed=<m/s>         range: speed along the path (default: 2)
 ##   --distance=<m>        range: distance spawn -> pattern centre (default: 10)
+##   --bench-trigger       range: run the trigger benchmark (TriggerBench) then quit; with
+##                         --algo the algo is started first and the bench waits for it.
+##   --bench-<key>=<v>     TriggerBench.DEFAULTS keys: distance-start/-step/-max, speed-start/
+##                         -factor/-max, passes, settle, pause; --bench-oracle (fires every frame),
+##                         --bench-out=<json> (default bench_results/trigger_<algo>_<date>.json),
+##                         --no-quit (stay in game when done)
 
 ## Game modes = what the external program is allowed to see / do.
 const MODES := {
@@ -37,6 +43,7 @@ const MODES := {
 
 var bridge: AimBridge
 var runner: AlgoRunner
+var bench: TriggerBench
 var mode_name := "full"
 var agent_slug := ""
 var weapon_slug := ""
@@ -75,15 +82,44 @@ func _ready() -> void:
 		world.target_slug = String(_args["--target"])
 	if _args.has("--map"):
 		world.set_map(String(_args["--map"]))
+	bench = TriggerBench.new()
+	bench.name = "TriggerBench"
+	add_child(bench)
+	bench.setup(self)
+	bench.progress.connect(func(t: String) -> void: hud.bench_text = t)
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
+	if _args.has("--bench-trigger"):
+		OS.set_environment("AIMLABS_AUTOSTART", "1")  # algos start armed (no CapsLock needed)
 	if _args.has("--algo"):
 		var e: Dictionary = runner.find_entry(String(_args["--algo"]))
 		if e.is_empty():
 			push_warning("--algo: '%s' not found in %s" % [_args["--algo"], runner.algos_dir])
 		else:
 			runner.start(e["path"])
+	if _args.has("--bench-trigger"):
+		_start_bench_from_args()
+
+
+func _start_bench_from_args() -> void:
+	world.set_map("range")
+	player.set_mouse_captured(true)
+	var cfg := {}
+	for key in TriggerBench.DEFAULTS:
+		var flag := "--bench-" + String(key).replace("_", "-")
+		if _args.has(flag):
+			cfg[key] = _args[flag] if typeof(_args[flag]) == TYPE_BOOL else float(_args[flag])
+	cfg["wait_client"] = _args.has("--algo")
+	var algo_name := String(_args.get("--algo", "oracle" if cfg.get("oracle", false) else "human")).get_basename()
+	bench.out_path = String(_args.get("--bench-out", AlgoRunner._repo_root().path_join(
+		"bench_results/trigger_%s_%s.json" % [algo_name, Time.get_datetime_string_from_system().replace(":", "-")])))
+	bench.finished.connect(func(_r: Dictionary) -> void:
+		if not _args.has("--no-quit"):
+			get_tree().quit())
+	if not bench.start(cfg):
+		push_error("bench: could not start")
+		get_tree().quit(1)
 
 
 func _start_bridge() -> void:

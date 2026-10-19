@@ -57,6 +57,29 @@ des dossiers de `game/assets/ka/agents/` et `weapons/`).
   `-- --map=range --target=reyna --pattern=circle --size=3 --speed=2 --distance=10`
   (`--pattern` : `none` | `line` | `square` | `circle`).
 
+### Benchmark « tir auto » (reproductible, une commande)
+
+Pour les algos qui **ne font que tirer** (pas de souris) : la caméra est figée droit devant,
+la cible traverse le réticule de gauche à droite ; à chaque distance la vitesse monte palier
+par palier (× 1,25), 4 passages par palier, et quand **aucun** des 4 passages n'est touché la
+cible est éloignée de 5 m et la vitesse repart du début. Fin quand même la vitesse la plus
+lente rate, ou à 40 m. Résultat : vitesse max touchée par distance, dans le HUD, la console
+et `bench_results/trigger_<algo>_<date>.json` (détail tirs / touches / headshots par passage).
+
+```bash
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py          # lance l'algo, attend sa connexion, mesure, quitte
+godot --path game -- --map=range --bench-trigger --bench-oracle --bridge=off      # référence : tire à chaque frame (plafond de l'arme)
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --weapon=spectre --bench-passes=3 --bench-speed-factor=1.5 --no-quit
+```
+
+Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-factor/-max`,
+`--bench-passes`, `--bench-settle`, `--bench-pause`, `--bench-out=<json>`. Depuis le menu Échap
+(map Stand de tir) : bouton **Benchmark tir auto**, qui mesure l'algo en cours — ou toi, à la
+souris, si aucun algo ne tourne. Le mode `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans
+l'environnement de l'algo pour qu'il démarre armé sans CapsLock. Le plafond est fixé par la
+cadence de l'arme (l'oracle rate déjà à 10 m / 4 m/s avec le Classic) : comparer les algos à
+arme égale.
+
 ## Assets (Kingdom Archives)
 
 Modèles, textures et animations proviennent de https://kingdomarchives.com/models
@@ -147,6 +170,10 @@ pendant que le menu est ouvert (pratique pour lire son log en direct). Options :
   (`yolo11s.pt`, un `.engine` déjà exporté…), `AIMLABS_YOLO_IMGSZ`, `AIMLABS_YOLO_DEVICE`. Banc
   hors jeu : `python algos/yolo_aim.py --bench <dossier_png>` donne les ms/frame et le taux de
   détection.
+* `algos/yolo_trigger.py` — **tir auto YOLO sans toucher la souris** : même détecteur (TensorRT),
+  tire dès que le réticule est dans une boîte « person », boîte avancée de sa vitesse écran ×
+  latence capture→tir (`--no-lead`), `--margin 0.6` pour ne tirer que sur le torse. `CAPSLOCK`
+  on/off, `ALT` maintenu. C'est l'algo de référence du benchmark « tir auto » ci-dessus.
 
 ### Compiler le pont
 
@@ -194,6 +221,7 @@ game/
   scripts/enemy.gd       agent 3e personne animé, hitboxes capsules sur le squelette, PV, respawn
   scripts/world.gd       monde plat, maps « vitrine » (29 agents, 24 armes) et « stand de tir »
   scripts/target_mover.gd déplace la cible du stand de tir (ligne / carré / cercle, face au joueur)
+  scripts/trigger_bench.gd benchmark « tir auto » : traversées de plus en plus rapides puis lointaines → JSON
   scripts/ka_assets.gd   lit manifest.json, instancie les GLB, matériaux PBR, retarget d'anims
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
   scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
@@ -211,7 +239,8 @@ sdk/python/
   aimlabs/client.py      AimClient (frame, state, keys, move, fire)
   aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
   examples/              bridge_selftest.py
-algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py, yolo_aim.py (YOLO)
+algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py, yolo_aim.py, yolo_trigger.py (YOLO)
+bench_results/           sorties JSON du benchmark « tir auto » (ignoré par git)
 tools/fetch_assets.py    télécharge/convertit les assets Kingdom Archives
 ```
 
