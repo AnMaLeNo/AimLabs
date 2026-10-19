@@ -57,28 +57,62 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--smooth", type=float, default=1.0, help="fraction de l'erreur corrigée par frame (1 = instantané)")
     ap.add_argument("--no-lead", action="store_true", help="pas d'extrapolation du mouvement de la cible")
     ap.add_argument("--no-half", action="store_true", help="FP32 même sur GPU")
+    ap.add_argument("--no-trt", action="store_true", help="pas de moteur TensorRT, model.predict() seulement")
     ap.add_argument("--debug", action="store_true", help="trace par frame (boîtes, erreur, commande)")
     ap.add_argument("--bench", metavar="DIR", help="mesure hors jeu sur les PNG d'un dossier")
     return ap.parse_args(argv)
 
 
 class Detector:
-    """Enveloppe Ultralytics : device auto, FP16 sur CUDA, préchauffe, boîtes « person » filtrées."""
+    """Détecteur « person ». Sur CUDA : moteur TensorRT FP16 (exporté et mis en cache au premier
+    lancement : `<modèle>_<h>x<w>.engine`), pré-traitement sur GPU, NMS — mesuré 5–7 ms par frame
+    sur RTX 3080 contre 17–23 ms pour `model.predict()` (surcoût Python/launchs CUDA sous Windows,
+    indépendant de la taille du modèle). Sinon (CPU, --no-trt, export impossible) : `model.predict()`."""
 
-    def __init__(self, model: str, imgsz: int, device: str, conf: float, half: bool) -> None:
+    def __init__(self, model: str, imgsz: int, device: str, conf: float, half: bool, trt: bool = True) -> None:
         import torch
         from ultralytics import YOLO
 
         import ultralytics
 
+        self.torch = torch
         self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
         self._has_quantize = tuple(int(v) for v in ultralytics.__version__.split(".")[:2]) >= (8, 4)  # half → quantize
         self.half = half and self.device.startswith("cuda")
         self.imgsz, self.conf = imgsz, conf
-        self.model = YOLO(model)
-        self.name = f"{os.path.basename(model)} @{imgsz} {self.device}{' fp16' if self.half else ''}"
         self.last_ms = 0.0
-        self.model.predict(np.zeros((imgsz, imgsz, 3), np.uint8), **self._kw())  # warm-up (alloc CUDA, cuDNN)
+        self.engine = None
+        # entrée réseau pour une frame 16:9 : largeur imgsz, hauteur arrondie au multiple de 32 supérieur
+        self.in_w, self.in_h = imgsz, int(math.ceil(imgsz * 9 / 16 / 32) * 32)
+        if self.device.startswith("cuda") and (trt or model.endswith(".engine")):
+            try:
+                self._load_engine(model)
+            except Exception as e:  # noqa: BLE001 — on retombe sur predict()
+                print(f"TensorRT indisponible ({e.__class__.__name__}: {e}), repli sur model.predict()", flush=True)
+        if self.engine is None:
+            self.model = YOLO(model)
+            self.name = f"{os.path.basename(model)} @{imgsz} {self.device}{' fp16' if self.half else ''} predict()"
+            self.model.predict(np.zeros((self.in_h, self.in_w, 3), np.uint8), **self._kw())  # warm-up
+        self.boxes(np.zeros((720, 1280, 3), np.uint8))  # cuDNN/TensorRT autotune à la vraie forme
+
+    def _load_engine(self, model: str) -> None:
+        from ultralytics import YOLO
+        from ultralytics.nn.autobackend import AutoBackend
+
+        try:
+            from ultralytics.utils.nms import non_max_suppression
+        except ImportError:  # ultralytics < 8.3.2xx
+            from ultralytics.utils.ops import non_max_suppression
+        self._nms = non_max_suppression
+        engine = model
+        if not model.endswith(".engine"):
+            engine = f"{os.path.splitext(model)[0]}_{self.in_h}x{self.in_w}.engine"
+            if not os.path.exists(engine):
+                print(f"export TensorRT {engine} (une fois, 1–4 min)…", flush=True)
+                out = YOLO(model).export(format="engine", half=True, imgsz=(self.in_h, self.in_w), device=0, verbose=False)
+                os.replace(out, engine)
+        self.engine = AutoBackend(engine, device=self.torch.device(self.device), fp16=True, verbose=False)
+        self.name = f"{os.path.basename(engine)} TensorRT fp16 {self.device}"
 
     def _kw(self) -> dict:
         kw = dict(imgsz=self.imgsz, conf=self.conf, classes=[PERSON_CLASS], device=self.device, verbose=False)
@@ -86,14 +120,28 @@ class Detector:
             kw["quantize" if self._has_quantize else "half"] = 16 if self._has_quantize else True
         return kw
 
+    def _raw_boxes(self, rgb: np.ndarray) -> List[Tuple[float, float, float, float, float]]:
+        if self.engine is None:
+            r = self.model.predict(rgb, **self._kw())[0]
+            return [(*b, c) for b, c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist())]
+        torch, h, w = self.torch, rgb.shape[0], rgb.shape[1]
+        with torch.inference_mode():
+            x = torch.from_numpy(rgb).to(self.device, non_blocking=True).permute(2, 0, 1)[None].float() / 255.0
+            x = torch.nn.functional.interpolate(x, size=(self.in_h, self.in_w), mode="bilinear", align_corners=False)
+            y = self.engine(x)  # le moteur attend du fp32 en entrée (il calcule en fp16)
+            y = y[0] if isinstance(y, (list, tuple)) else y
+            det = self._nms(y.float(), self.conf, 0.45, classes=[PERSON_CLASS])[0].cpu()
+        sx, sy = w / self.in_w, h / self.in_h
+        return [(x1 * sx, y1 * sy, x2 * sx, y2 * sy, c) for x1, y1, x2, y2, c, _cls in det.tolist()]
+
     def boxes(self, rgb: np.ndarray) -> List[Tuple[float, float, float, float, float]]:
         """[(x1, y1, x2, y2, conf)] sans le viewmodel (boîte large collée au bas de l'image)."""
         t0 = time.perf_counter()
-        r = self.model.predict(rgb, **self._kw())[0]
+        raw = self._raw_boxes(rgb)
         self.last_ms = (time.perf_counter() - t0) * 1000.0
         h = rgb.shape[0]
         out = []
-        for (x1, y1, x2, y2), c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist()):
+        for x1, y1, x2, y2, c in raw:
             bw, bh = x2 - x1, y2 - y1
             if y2 > 0.97 * h and bh < 1.2 * bw:  # bras + arme du joueur : large, tronqué par le bas
                 continue
@@ -129,15 +177,19 @@ def bench(args: argparse.Namespace) -> int:
         print(f"aucun PNG dans {args.bench}", file=sys.stderr)
         return 1
     from PIL import Image
-    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half)
+    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half, not args.no_trt)
     imgs = [np.asarray(Image.open(f).convert("RGB")) for f in files]
-    times, found = [], 0
-    for img in imgs:
-        b = det.boxes(img)
-        times.append(det.last_ms)
-        found += bool(b)
+    found = 0
+    for p in range(3):  # 3 passes : la dernière reflète le régime établi (horloges GPU montées)
+        times, found = [], 0
+        for img in imgs:
+            b = det.boxes(img)
+            times.append(det.last_ms)
+            found += bool(b)
+        print(f"  passe {p + 1} : {np.mean(times):.1f} ms/frame (médiane {np.median(times):.1f}, "
+              f"min {min(times):.1f}, max {max(times):.1f})")
     print(f"{det.name}: {len(files)} images, détection sur {found}/{len(files)}, "
-          f"inférence {np.mean(times):.1f} ms/frame (min {min(times):.1f}, max {max(times):.1f})")
+          f"inférence {np.mean(times):.1f} ms/frame en régime établi")
     return 0
 
 
@@ -146,7 +198,7 @@ def main(argv: List[str]) -> int:
     if args.bench:
         return bench(args)
 
-    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half)
+    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half, not args.no_trt)
     enabled, autofire, head = False, False, True
     prev: Optional[Tuple[float, float, float]] = None  # (aim_x, aim_y, capture_usec) pour la vitesse écran
     last_fire = 0.0
