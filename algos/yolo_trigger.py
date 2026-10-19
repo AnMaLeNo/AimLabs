@@ -112,6 +112,11 @@ def main(argv) -> int:
                     else:
                         shifted.append(b)
             prev = (boxes, f.capture_usec)
+            # marque = ce que l'image montre (vérité à la capture, pour le benchmark) ;
+            # tir = boîte avancée de la latence (là où la cible sera quand la balle partira)
+            seen = box_under(boxes, cx, cy, args.margin)
+            if seen is not None:
+                c.mark(frame_id=f.id)
             hit = box_under(shifted, cx, cy, args.margin)
             fired = False
             if hit is not None:

@@ -26,6 +26,7 @@ constexpr uint32_t MODE_FIRE = 1u << 2;   // FIRE commands are applied
 
 constexpr uint32_t CMD_MOVE = 1;
 constexpr uint32_t CMD_FIRE = 2;
+constexpr uint32_t CMD_MARK = 3; // « the target is under the reticle » claim (benchmarks), dx/dy = screen point
 
 constexpr uint32_t KEY_FORWARD = 1u << 0;
 constexpr uint32_t KEY_BACK = 1u << 1;

@@ -265,6 +265,8 @@ func _build_map_rows(root: VBoxContainer) -> void:
 			game.bench.out_path = AlgoRunner._repo_root().path_join("bench_results/trigger_%s_%s.json" % [
 				runner.current_name() if runner.is_running() else "human",
 				Time.get_datetime_string_from_system().replace(":", "-")])
+			if not game.bench.finished.is_connected(_on_bench_finished):
+				game.bench.finished.connect(_on_bench_finished)
 			game.bench.start({ "settle": 1.0 })
 			game.player.set_mouse_captured(true))
 	_bench_row.add_child(_bench_btn)
@@ -282,6 +284,11 @@ func _spin(min_v: float, max_v: float, step: float, value: float, on_change: Cal
 	box.custom_minimum_size.x = 90
 	box.value_changed.connect(on_change)
 	return box
+
+
+func _on_bench_finished(_r: Dictionary) -> void:
+	game.player.set_mouse_captured(false)
+	game.bench.show_sheet()
 
 
 func _selected_entry() -> Dictionary:

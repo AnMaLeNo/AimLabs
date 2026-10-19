@@ -22,8 +22,9 @@ extends Node
 ##   --bench-trigger       range: run the trigger benchmark (TriggerBench) then quit; with
 ##                         --algo the algo is started first and the bench waits for it.
 ##   --bench-<key>=<v>     TriggerBench.DEFAULTS keys: distance-start/-step/-max, speed-start/
-##                         -min/-max, precision, confirm, width, travel-widths, settle, pause;
-##                         --bench-oracle (fires every frame),
+##                         -min/-max, precision, confirm, width, travel-widths, heights
+##                         (feet,knees,pelvis,belly,chest,head), criterion (mark|hit|auto),
+##                         mark-tolerance, settle, pause; --bench-oracle (fires + marks every tick),
 ##                         --bench-out=<json> (default bench_results/trigger_<algo>_<date>.json),
 ##                         --no-quit (stay in game when done)
 
@@ -110,13 +111,16 @@ func _start_bench_from_args() -> void:
 	for key in TriggerBench.DEFAULTS:
 		var flag := "--bench-" + String(key).replace("_", "-")
 		if _args.has(flag):
-			cfg[key] = _args[flag] if typeof(_args[flag]) == TYPE_BOOL else float(_args[flag])
+			var v: Variant = _args[flag]
+			cfg[key] = v if typeof(v) == TYPE_BOOL or typeof(TriggerBench.DEFAULTS[key]) == TYPE_STRING else float(v)
 	cfg["wait_client"] = _args.has("--algo")
 	var algo_name := String(_args.get("--algo", "oracle" if cfg.get("oracle", false) else "human")).get_basename()
 	bench.out_path = String(_args.get("--bench-out", AlgoRunner._repo_root().path_join(
 		"bench_results/trigger_%s_%s.json" % [algo_name, Time.get_datetime_string_from_system().replace(":", "-")])))
 	bench.finished.connect(func(_r: Dictionary) -> void:
-		if not _args.has("--no-quit"):
+		if _args.has("--no-quit"):
+			bench.show_sheet()
+		else:
 			get_tree().quit())
 	if not bench.start(cfg):
 		push_error("bench: could not start")
