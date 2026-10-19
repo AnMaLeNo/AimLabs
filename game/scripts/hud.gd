@@ -49,7 +49,7 @@ func set_mouse_captured(captured: bool) -> void:
 	overlay.visible = not captured
 	hint_label.visible = captured
 	if not captured:
-		overlay_label.text = "WASD move · Shift sprint · Space jump · Left click shoot · T reset targets · Esc menu"
+		overlay_label.text = "WASD move · Shift sprint · Space jump · Left click shoot · R reload · F inspect · T reset targets · Esc menu (character, weapon, algos)"
 
 
 func on_shot_fired(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> void:

@@ -1,39 +1,48 @@
 class_name Enemy
 extends Node3D
-## Static humanoid target. Uses Kenney's CC0 "Blocky Characters" (2.7 units tall,
-## scaled to ~1.8 m). Hitboxes: head (layer enemy_head) and body/arms (layer enemy_body).
+## Static humanoid target: a Kingdom Archives agent (third-person model, character-select
+## idle loop). Hitboxes are capsules built from the skeleton (head / torso / arms / legs):
+## head on layer enemy_head, everything else on enemy_body.
 
 signal damaged(zone: String, damage: int, hp_left: int)
 signal died()
 signal respawned()
 
-const CHARACTER_SCENES: Array[String] = [
-	"res://assets/characters/character-a.glb",
-	"res://assets/characters/character-b.glb",
-	"res://assets/characters/character-c.glb",
-	"res://assets/characters/character-d.glb",
-	"res://assets/characters/character-e.glb",
-	"res://assets/characters/character-f.glb",
-	"res://assets/characters/character-g.glb",
-	"res://assets/characters/character-h.glb",
-]
-const MODEL_SCALE := 1.8 / 2.7
 const LAYER_ENEMY_BODY := 1 << 2
 const LAYER_ENEMY_HEAD := 1 << 3
+## Bone segments -> (zone, radius). Bone names are shared by all 29 agents.
+const SEGMENTS := [
+	["Pelvis", "Neck", "body", 0.17],
+	["L_Shoulder", "L_Elbow", "arm", 0.07],
+	["L_Elbow", "L_Hand", "arm", 0.06],
+	["R_Shoulder", "R_Elbow", "arm", 0.07],
+	["R_Elbow", "R_Hand", "arm", 0.06],
+	["Pelvis", "L_Knee", "body", 0.10],
+	["L_Knee", "L_Foot", "body", 0.08],
+	["Pelvis", "R_Knee", "body", 0.10],
+	["R_Knee", "R_Foot", "body", 0.08],
+]
+const HEAD_RADIUS := 0.12
 
+@export var agent_slug := ""
 @export var max_hp := 100
 @export var respawn_delay := 3.0
-@export var skin_index := -1  # -1 = random
 
 var hp: int
 var alive := true
+var display_name := ""
 
 var _model: Node3D
+var _skeleton: Skeleton3D
 var _anim: AnimationPlayer
+var _idle := ""
 var _meshes: Array[MeshInstance3D] = []
 var _hitboxes: Array[StaticBody3D] = []
 var _flash_material: StandardMaterial3D
 var _flash_tween: Tween
+var _death_tween: Tween
+var _head_local := Vector3(0, 1.7, 0)
+var _chest_local := Vector3(0, 1.2, 0)
 
 
 func _ready() -> void:
@@ -49,39 +58,76 @@ func _ready() -> void:
 
 
 func _build_model() -> void:
-	var idx := skin_index if skin_index >= 0 else randi() % CHARACTER_SCENES.size()
-	var scene: PackedScene = load(CHARACTER_SCENES[idx % CHARACTER_SCENES.size()])
-	_model = scene.instantiate()
-	_model.scale = Vector3.ONE * MODEL_SCALE
+	var entry: Dictionary = KAAssets.agents().get(agent_slug, {})
+	display_name = String(entry.get("name", agent_slug))
+	_model = KAAssets.instantiate(entry) if not entry.is_empty() else null
+	if _model == null:
+		_model = _placeholder()
 	add_child(_model)
 	for mi in _model.find_children("*", "MeshInstance3D", true, false):
 		_meshes.append(mi)
+	var skels := _model.find_children("*", "Skeleton3D", true, false)
+	if skels.size() > 0:
+		_skeleton = skels[0]
 	var players := _model.find_children("*", "AnimationPlayer", true, false)
 	if players.size() > 0:
 		_anim = players[0]
-		for anim_name in ["idle", "static"]:
-			if _anim.has_animation(anim_name):
-				_anim.get_animation(anim_name).loop_mode = Animation.LOOP_LINEAR
+		_idle = KAAssets.pick_idle(_anim)
+		if _idle != "":
+			_anim.get_animation(_idle).loop_mode = Animation.LOOP_LINEAR
 		_play_idle()
 
 
+func _placeholder() -> Node3D:
+	var mi := MeshInstance3D.new()
+	var capsule := CapsuleMesh.new()
+	capsule.radius = 0.3
+	capsule.height = 1.8
+	mi.mesh = capsule
+	mi.position.y = 0.9
+	var root := Node3D.new()
+	root.add_child(mi)
+	return root
+
+
 func _play_idle() -> void:
-	if _anim == null:
+	if _anim == null or _idle == "":
 		return
-	if _anim.has_animation("idle"):
-		_anim.play("idle")
-		_anim.seek(randf() * _anim.current_animation_length, true)
+	_anim.play(_idle)
+	_anim.seek(randf() * _anim.current_animation_length, true)
 
 
-## Boxes in model space (before MODEL_SCALE), measured from the glb (tools/measure_model.gd).
+## Capsules between skeleton bones, measured on the rest pose (the idle barely moves).
 func _build_hitboxes() -> void:
-	_add_hitbox("body", LAYER_ENEMY_BODY, Vector3(-0.4, 0.0, -0.3), Vector3(0.4, 1.9, 0.3))
-	_add_hitbox("arm", LAYER_ENEMY_BODY, Vector3(0.4, 0.8, -0.3), Vector3(0.8, 1.9, 0.1))
-	_add_hitbox("arm", LAYER_ENEMY_BODY, Vector3(-0.8, 0.8, -0.3), Vector3(-0.4, 1.9, 0.1))
-	_add_hitbox("head", LAYER_ENEMY_HEAD, Vector3(-0.4, 1.9, -0.4), Vector3(0.4, 2.7, 0.4))
+	if _skeleton == null:
+		_add_capsule("body", LAYER_ENEMY_BODY, Vector3(0, 0.1, 0), Vector3(0, 1.5, 0), 0.25)
+		_add_capsule("head", LAYER_ENEMY_HEAD, Vector3(0, 1.55, 0), Vector3(0, 1.8, 0), HEAD_RADIUS)
+		return
+	var skel_xf := _model.global_transform.affine_inverse() * _skeleton.global_transform
+	for seg: Array in SEGMENTS:
+		var a: Variant = _bone_pos(String(seg[0]), skel_xf)
+		var b: Variant = _bone_pos(String(seg[1]), skel_xf)
+		if a == null or b == null:
+			continue
+		_add_capsule(String(seg[2]), LAYER_ENEMY_BODY, a, b, float(seg[3]))
+	var head: Variant = _bone_pos("Head", skel_xf)
+	if head != null:
+		var top: Vector3 = head + Vector3(0, 0.16, 0)
+		_add_capsule("head", LAYER_ENEMY_HEAD, head - Vector3(0, 0.02, 0), top, HEAD_RADIUS)
+		_head_local = head + Vector3(0, 0.07, 0)
+	var chest: Variant = _bone_pos("Spine3", skel_xf)
+	if chest != null:
+		_chest_local = chest
 
 
-func _add_hitbox(zone: String, layer: int, bmin: Vector3, bmax: Vector3) -> void:
+func _bone_pos(bone: String, skel_xf: Transform3D) -> Variant:
+	var i := _skeleton.find_bone(bone)
+	if i < 0:
+		return null
+	return skel_xf * _skeleton.get_bone_global_rest(i).origin
+
+
+func _add_capsule(zone: String, layer: int, a: Vector3, b: Vector3, radius: float) -> void:
 	var body := StaticBody3D.new()
 	body.name = "Hitbox_%s_%d" % [zone, _hitboxes.size()]
 	body.collision_layer = layer
@@ -90,10 +136,18 @@ func _add_hitbox(zone: String, layer: int, bmin: Vector3, bmax: Vector3) -> void
 	body.set_meta("enemy", self)
 	body.set_meta("zone", zone)
 	var shape := CollisionShape3D.new()
-	var box := BoxShape3D.new()
-	box.size = (bmax - bmin) * MODEL_SCALE
-	shape.shape = box
-	shape.position = (bmin + bmax) * 0.5 * MODEL_SCALE
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = radius
+	capsule.height = maxf(a.distance_to(b) + radius * 2.0, radius * 2.0)
+	shape.shape = capsule
+	var dir := (b - a).normalized()
+	var xf := Transform3D.IDENTITY
+	xf.origin = (a + b) * 0.5
+	if dir.length() > 0.5:
+		var up := Vector3.FORWARD if absf(dir.dot(Vector3.UP)) > 0.99 else Vector3.UP
+		var x := up.cross(dir).normalized()
+		xf.basis = Basis(x, dir, x.cross(dir).normalized())
+	shape.transform = xf
 	body.add_child(shape)
 	add_child(body)
 	_hitboxes.append(body)
@@ -124,13 +178,21 @@ func _die() -> void:
 	alive = false
 	_set_hitboxes_enabled(false)
 	died.emit()
-	if _anim and _anim.has_animation("die"):
-		_anim.play("die")
-	var timer := get_tree().create_timer(respawn_delay)
-	timer.timeout.connect(respawn)
+	if _anim:
+		_anim.pause()
+	if _death_tween:
+		_death_tween.kill()
+	_death_tween = create_tween().set_parallel(true)
+	_death_tween.tween_property(_model, "rotation:x", -PI * 0.5, 0.35).set_ease(Tween.EASE_IN)
+	_death_tween.tween_property(_model, "position:y", -0.6, 2.0).set_delay(1.0)
+	get_tree().create_timer(respawn_delay).timeout.connect(respawn)
 
 
 func respawn() -> void:
+	if _death_tween:
+		_death_tween.kill()
+	_model.rotation = Vector3.ZERO
+	_model.position = Vector3.ZERO
 	hp = max_hp
 	alive = true
 	_set_hitboxes_enabled(true)
@@ -146,8 +208,8 @@ func _set_hitboxes_enabled(enabled: bool) -> void:
 
 ## World-space centre of the head hitbox (handy for tests and aim tools).
 func head_position() -> Vector3:
-	return to_global(Vector3(0.0, 2.3, 0.0) * MODEL_SCALE)
+	return to_global(_head_local)
 
 
 func body_position() -> Vector3:
-	return to_global(Vector3(0.0, 1.0, 0.0) * MODEL_SCALE)
+	return to_global(_chest_local)

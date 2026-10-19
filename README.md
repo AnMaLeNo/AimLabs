@@ -8,8 +8,17 @@ de vision du joueur. Le meilleur joueur est celui dont le programme vise le mieu
 
 ## État du projet
 
-**Partie 1 — sandbox FPS** (ce dépôt, en cours) : déplacement, tir hitscan,
-cibles humanoïdes statiques, arène quasi infinie avec blocs et murs.
+**Partie 1 — sandbox FPS** (fait) : déplacement, tir hitscan, cibles humanoïdes
+statiques sur un monde plat.
+
+**Partie 3 — graphismes Kingdom Archives** (fait, à valider sur GPU) : les 29 agents
+(3e personne, animés, hitboxes calculées sur le squelette) alignés face au joueur,
+les 24 armes posées au sol, et une vue première personne fidèle au viewer du site :
+bras de l'agent choisi + arme sur le bone `R_WeaponMaster`, caméra sur le bone `Camera`,
+animations equip / fire / reload / inspect, cadence (`FireRate`), mode automatique ou
+semi-automatique (`AutomaticWeapon`) et durées de reload / equip propres à chaque arme.
+Personnage et arme se choisissent dans le menu Échap. Les assets sont dans
+`game/assets/ka/` (≈430 Mo, textures en WebP q92, GLB intacts) ; voir « Assets » plus bas.
 
 **Partie 2 — AimBridge** (fait, à valider sur GPU) : GDExtension C++ (`bridge/`)
 qui publie chaque frame rendue et l'état du joueur dans une **mémoire partagée**
@@ -29,8 +38,28 @@ godot --path game
 
 Sans GPU (VM, CI) : `godot --path game --rendering-method gl_compatibility`.
 
-Commandes : WASD déplacer · Shift sprint · Espace saut · clic gauche tirer ·
-T réinitialiser les cibles · Échap menu des algos (libère la souris) / clic hors du menu pour reprendre.
+Commandes : WASD déplacer · Shift sprint · Espace saut · clic gauche tirer (maintenu
+pour les armes automatiques) · R recharger · F inspecter · T réinitialiser les cibles ·
+Échap menu (personnage, arme, algos ; libère la souris) / clic hors du menu pour reprendre.
+
+Options : `-- --agent=<slug> --weapon=<slug>` (défaut `jett` / `classic`, slugs = noms
+des dossiers de `game/assets/ka/agents/` et `weapons/`).
+
+## Assets (Kingdom Archives)
+
+Modèles, textures et animations proviennent de https://kingdomarchives.com/models
+(propriété de Riot Games, redistribués par le site ; projet non commercial).
+`tools/fetch_assets.py` les télécharge et écrit `game/assets/ka/manifest.json`
+(matériaux PBR, réglages des armes, animations FP par arme) :
+
+```sh
+pip install pillow
+python tools/fetch_assets.py          # cache brut dans .ka_cache/, sortie dans game/assets/ka/
+godot --headless --path game --import
+```
+
+Deux entrées du site n'ont pas de vue première personne (`spike`, `veto-fp-ult`) :
+elles sont posées au sol mais absentes du sélecteur d'arme.
 
 ## AimBridge (interface pour l'aide à la visée)
 
@@ -133,16 +162,18 @@ godot --path game --rendering-method gl_compatibility -- --screenshot=/tmp/shot.
 game/
   project.godot          réglages, actions d'entrée, couches physiques
   scenes/main.tscn       racine : World + Player + HUD
-  scenes/player.tscn     CharacterBody3D, caméra, viewmodel de l'arme
-  scripts/player.gd      mouvement, visée (REAL/ASSIST), tir hitscan, recul
-  scripts/enemy.gd       cible humanoïde : hitboxes tête/corps/bras, PV, respawn
-  scripts/world.gd       génération procédurale (seed), lumière, ciel, brouillard
+  scenes/player.tscn     CharacterBody3D, caméra, viewmodel FP (SubViewport, FOV du viewer)
+  scripts/player.gd      mouvement, visée (REAL/ASSIST), tir hitscan auto/semi, recul
+  scripts/viewmodel.gd   bras FP de l'agent + arme (bone R_WeaponMaster), anims, cadence, muzzle
+  scripts/enemy.gd       agent 3e personne animé, hitboxes capsules sur le squelette, PV, respawn
+  scripts/world.gd       monde plat : 29 agents en ligne, 24 armes au sol, lumière, ciel
+  scripts/ka_assets.gd   lit manifest.json, instancie les GLB, matériaux PBR, retarget d'anims
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
   scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
   scripts/algo_runner.gd lance/arrête les algos (process + pipes stdout/stderr)
   scripts/algo_menu.gd   menu Échap : liste, Lancer/Arrêter, log, mode
-  assets/characters/     Kenney « Blocky Characters » (CC0)
-  assets/weapons/vandal/   « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt)
+  assets/ka/             Kingdom Archives : agents/, agents_fp/, weapons/, manifest.json
+  assets/weapons/vandal/   ancien viewmodel « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt), plus utilisé
   bin/                   aimbridge.gdextension + binaires Linux/Windows
 bridge/
   src/protocol.h         layout de la mémoire partagée (version 2 : + clavier/souris)
@@ -154,6 +185,7 @@ sdk/python/
   aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
   examples/              bridge_selftest.py
 algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py
+tools/fetch_assets.py    télécharge/convertit les assets Kingdom Archives
 ```
 
 Couches physiques : 1 `world`, 2 `player`, 3 `enemy_body`, 4 `enemy_head`.
