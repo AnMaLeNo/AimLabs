@@ -3,12 +3,13 @@ aim-assist commands, through the AimBridge shared memory."""
 
 from __future__ import annotations
 
+import os
 import struct
 import sys
 import time
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Optional
+from typing import FrozenSet, Optional
 
 import numpy as np
 
@@ -28,15 +29,45 @@ class Frame:
     image: np.ndarray  # (height, width, 4) uint8 RGBA, own copy
 
 
-class AimClient:
-    """Attach with ``AimClient()`` while the game runs (default segment name ``aimlabs``)."""
+def _bits_to_names(words: tuple) -> FrozenSet[str]:
+    names = []
+    for w, word in enumerate(words):
+        while word:
+            low = word & -word
+            slot = w * 64 + low.bit_length() - 1
+            names.append(P.KEY_NAMES.get(slot, f"KEY_{slot}"))
+            word ^= low
+    return frozenset(names)
 
-    def __init__(self, name: str = "aimlabs", timeout: float = 10.0, poll_interval: float = 0.0005):
-        self.name = name
+
+@dataclass
+class Keys:
+    """Snapshot of the player's keyboard / mouse buttons (Godot key names, e.g. "F", "SPACE",
+    "SHIFT", "CAPSLOCK", "F1", "KP_0"; mouse: "LEFT", "RIGHT", "MIDDLE", "XBUTTON1" ...)."""
+    down: FrozenSet[str]           # layout keycodes (what is printed on the key)
+    physical_down: FrozenSet[str]  # physical, QWERTY-position keycodes
+    mouse_down: FrozenSet[str]
+    just_pressed: FrozenSet[str]   # vs the previous Keys returned by the same AimClient
+    just_released: FrozenSet[str]
+
+    def __contains__(self, name: str) -> bool:
+        return name.upper() in self.down or name.upper() in self.mouse_down
+
+    def pressed(self, name: str) -> bool:
+        return name in self
+
+
+class AimClient:
+    """Attach with ``AimClient()`` while the game runs. The segment name defaults to the
+    ``AIMLABS_SHM`` environment variable (set by the game when it launches an algo), else ``aimlabs``."""
+
+    def __init__(self, name: Optional[str] = None, timeout: float = 10.0, poll_interval: float = 0.0005):
+        self.name = name or os.environ.get("AIMLABS_SHM", "aimlabs")
         self.poll_interval = poll_interval
         self._shm: Optional[shared_memory.SharedMemory] = None
         self._heartbeat = 0
         self.last_frame_id = 0
+        self._prev_keys: FrozenSet[str] = frozenset()
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -177,7 +208,9 @@ class AimClient:
     # ------------------------------------------------------------ state
 
     def state(self) -> dict:
-        for _ in range(64):
+        for attempt in range(200):
+            if attempt:
+                time.sleep(0.0002)
             values = P.STATE.unpack_from(self._buf, self.state_offset)
             if values[0] & 1:
                 continue
@@ -195,8 +228,25 @@ class AimClient:
                 "fire": bool(keys & P.KEY_FIRE), "mouse_captured": bool(keys & P.KEY_MOUSE_CAPTURED),
                 "on_floor": bool(keys & P.KEY_ON_FLOOR),
             }
+            kb = P.STATE_KEYS.unpack_from(self._buf, self.state_offset + P.STATE_KEYS_OFFSET)
+            seq3 = self._u32.unpack_from(self._buf, self.state_offset)[0]
+            if seq3 != values[0]:
+                continue
+            d["keys_down"] = _bits_to_names(kb[0:8])
+            d["physical_keys_down"] = _bits_to_names(kb[8:16])
+            d["mouse_down"] = frozenset(n for b, n in P.MOUSE_BUTTON_NAMES.items() if kb[16] & (1 << (b - 1)))
             return d
         raise RuntimeError("state block kept changing")
+
+    def keys(self) -> Keys:
+        """Keyboard / mouse snapshot with edge detection relative to the previous call
+        (``keys().just_pressed`` holds the names that went down since the last ``keys()``)."""
+        s = self.state()
+        down = s["keys_down"] | s["mouse_down"]
+        k = Keys(s["keys_down"], s["physical_keys_down"], s["mouse_down"],
+                 down - self._prev_keys, self._prev_keys - down)
+        self._prev_keys = down
+        return k
 
     # ------------------------------------------------------------ commands
 

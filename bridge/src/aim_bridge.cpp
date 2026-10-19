@@ -3,6 +3,7 @@
 #include <godot_cpp/classes/display_server.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/input.hpp>
 #include <godot_cpp/classes/os.hpp>
 #include <godot_cpp/classes/rd_texture_format.hpp>
 #include <godot_cpp/classes/rendering_device.hpp>
@@ -43,6 +44,40 @@ inline size_t align_up(size_t p_value, size_t p_align) {
 }
 
 constexpr uint64_t CLIENT_TIMEOUT_USEC = 2000000;
+
+// Key slots that exist in Godot's Key enum (see protocol.h), as [first, last] ranges.
+constexpr uint32_t KEY_SLOT_RANGES[][2] = {
+	{ 32, 126 }, { 165, 165 }, { 167, 167 }, // Latin-1 keycodes
+	{ 257, 318 }, { 322, 323 }, { 325, 325 }, { 328, 334 }, { 340, 371 }, { 385, 399 }, // specials
+};
+
+inline Key slot_to_key(uint32_t p_slot) {
+	return p_slot < 256 ? (Key)p_slot : (Key)(GODOT_KEY_SPECIAL | (p_slot - 256));
+}
+
+void poll_keyboard(uint64_t *p_key_bits, uint64_t *p_physical_bits, uint32_t *p_mouse_buttons) {
+	Input *input = Input::get_singleton();
+	std::memset(p_key_bits, 0, KEY_SLOTS / 8);
+	std::memset(p_physical_bits, 0, KEY_SLOTS / 8);
+	for (const auto &range : KEY_SLOT_RANGES) {
+		for (uint32_t slot = range[0]; slot <= range[1]; slot++) {
+			Key key = slot_to_key(slot);
+			if (input->is_key_pressed(key)) {
+				p_key_bits[slot / 64] |= 1ull << (slot % 64);
+			}
+			if (input->is_physical_key_pressed(key)) {
+				p_physical_bits[slot / 64] |= 1ull << (slot % 64);
+			}
+		}
+	}
+	uint32_t buttons = 0;
+	for (int b = 1; b <= 9; b++) {
+		if (input->is_mouse_button_pressed((MouseButton)b)) {
+			buttons |= 1u << (b - 1);
+		}
+	}
+	*p_mouse_buttons = buttons;
+}
 
 // Area-average downscale of a tightly packed RGBA8 image.
 void downscale_rgba8(const uint8_t *p_src, uint32_t p_sw, uint32_t p_sh, uint8_t *p_dst, uint32_t p_dw, uint32_t p_dh) {
@@ -502,6 +537,12 @@ void AimBridge::publish_state(const Dictionary &p_state) {
 	_sens = (float)(double)p_state.get("sens", 0.07);
 
 	State *s = _state();
+	// Poll input before the seqlock write: ~250 Input queries would otherwise hold the
+	// odd-seq window open long enough for a reader to spin out.
+	uint64_t key_bits[KEY_SLOTS / 64];
+	uint64_t physical_key_bits[KEY_SLOTS / 64];
+	uint32_t mouse_buttons = 0;
+	poll_keyboard(key_bits, physical_key_bits, &mouse_buttons);
 	atomic_store<uint32_t>(&s->seq, s->seq + 1);
 	s->keys = (uint32_t)(int64_t)p_state.get("keys", 0);
 	s->tick = _tick;
@@ -530,6 +571,9 @@ void AimBridge::publish_state(const Dictionary &p_state) {
 	s->avg_latency_usec = (uint64_t)_avg_latency_usec;
 	s->fps = (float)(double)p_state.get("fps", 0.0);
 	s->frames_published = _frames_published.load();
+	std::memcpy(s->key_bits, key_bits, sizeof(key_bits));
+	std::memcpy(s->physical_key_bits, physical_key_bits, sizeof(physical_key_bits));
+	s->mouse_buttons = mouse_buttons;
 	atomic_store<uint32_t>(&s->seq, s->seq + 1);
 }
 

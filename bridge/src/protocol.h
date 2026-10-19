@@ -1,9 +1,9 @@
-// AimBridge shared-memory protocol, version 1.
+// AimBridge shared-memory protocol, version 2.
 //
 // One shared-memory segment (POSIX shm on Linux, named file mapping on Windows)
 // is created by the game and attached by the player's program. Layout:
 //
-//   [Header 256 B][State 256 B][Command ring: 64 B header + N x 32 B]
+//   [Header 256 B][State 512 B][Command ring: 64 B header + N x 32 B]
 //   [Frame slot 0][Frame slot 1]...   (each: 64 B header + max_width*max_height*4 B)
 //
 // Frames and the state block are protected by seqlocks (odd `seq` = being
@@ -17,7 +17,7 @@
 namespace aimbridge {
 
 constexpr uint32_t MAGIC = 0x314D4941; // "AIM1"
-constexpr uint32_t VERSION = 1;
+constexpr uint32_t VERSION = 2;
 constexpr uint32_t PIXEL_FORMAT_RGBA8 = 1;
 
 constexpr uint32_t MODE_VISION = 1u << 0; // frames are published
@@ -36,6 +36,17 @@ constexpr uint32_t KEY_SPRINT = 1u << 5;
 constexpr uint32_t KEY_FIRE = 1u << 6;
 constexpr uint32_t KEY_MOUSE_CAPTURED = 1u << 7;
 constexpr uint32_t KEY_ON_FLOOR = 1u << 8;
+
+// Raw keyboard: one bit per key "slot" in State::key_bits (layout keycode) and
+// State::physical_key_bits (physical, QWERTY-position keycode).
+//   slot < 256   : Godot keycode (Latin-1: 'A' = 65, '1' = 49, ' ' = 32 ...)
+//   slot >= 256  : Godot special key, slot = 256 + (keycode & ~KEY_SPECIAL)
+//                  (ESCAPE = 257, SHIFT = 277, CTRL = 278, ALT = 280, CAPSLOCK = 281,
+//                   F1 = 284 ... F12 = 295, KP_0 = 390 ...)
+// State::mouse_buttons: bit (n - 1) set when Godot mouse button n is pressed
+// (1 = left, 2 = right, 3 = middle, 4/5 = wheel, 6/7 = wheel tilt, 8/9 = side).
+constexpr uint32_t KEY_SLOTS = 512;
+constexpr uint32_t GODOT_KEY_SPECIAL = 1u << 22;
 
 struct Header {
 	uint32_t magic;
@@ -105,9 +116,12 @@ struct State {
 	uint64_t avg_latency_usec;
 	float fps;
 	uint32_t frames_published;
-	uint8_t reserved[256 - 128];
+	uint64_t key_bits[KEY_SLOTS / 64]; // offset 128
+	uint64_t physical_key_bits[KEY_SLOTS / 64]; // offset 192
+	uint32_t mouse_buttons; // offset 256
+	uint8_t reserved[512 - 260];
 };
-static_assert(sizeof(State) == 256, "State must be 256 bytes");
+static_assert(sizeof(State) == 512, "State must be 512 bytes");
 
 struct CommandRing {
 	uint64_t head; // atomic, written by the client

@@ -117,6 +117,11 @@ def run(args) -> int:
             ok = False
 
         print("keys:", s2["keys"], "pos:", tuple(round(v, 2) for v in s2["pos"]), "fps:", round(s2["fps"]))
+        k = c.keys()
+        if not (isinstance(k.down, frozenset) and isinstance(k.mouse_down, frozenset)):
+            print("FAIL: keys() unreadable")
+            ok = False
+        print("keyboard down:", sorted(k.down), "physical:", sorted(k.physical_down), "mouse:", sorted(k.mouse_down))
     print("SELFTEST", "OK" if ok else "FAILED")
     return 0 if ok else 1
 

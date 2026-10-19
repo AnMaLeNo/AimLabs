@@ -7,6 +7,10 @@ extends Node
 ##   --bridge=off          do not start the AimBridge (default: on)
 ##   --mode=<name>         game mode, see MODES (default: full)
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
+##   --menu                with --screenshot: keep the Esc menu open
+##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
+##   --algo=<file.py>      start this algo right away
+##   --python=<cmd>        interpreter used to run algos (default: python3 / python)
 
 ## Game modes = what the external program is allowed to see / do.
 const MODES := {
@@ -21,8 +25,10 @@ const MODES := {
 @onready var world: World = $World
 @onready var player: Player = $Player
 @onready var hud: HUD = $HUD
+@onready var menu: AlgoMenu = $HUD/AlgoMenu
 
 var bridge: AimBridge
+var runner: AlgoRunner
 var mode_name := "full"
 
 var _frames := 0
@@ -37,22 +43,30 @@ func _ready() -> void:
 	player.shot_fired.connect(hud.on_shot_fired)
 	player.target_hit.connect(hud.on_target_hit)
 	player.mouse_capture_changed.connect(hud.set_mouse_captured)
-	if _args.has("--screenshot") or _args.has("--smoke-test"):
+	if (_args.has("--screenshot") or _args.has("--smoke-test")) and not _args.has("--menu"):
 		player.set_mouse_captured(true)
 	if String(_args.get("--bridge", "on")) != "off":
 		_start_bridge()
+	runner = AlgoRunner.new()
+	runner.name = "AlgoRunner"
+	add_child(runner)
+	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
+	menu.setup(self, runner)
+	menu.visible = not player.mouse_captured
+	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
+	if _args.has("--algo"):
+		var e: Dictionary = runner.find_entry(String(_args["--algo"]))
+		if e.is_empty():
+			push_warning("--algo: '%s' not found in %s" % [_args["--algo"], runner.algos_dir])
+		else:
+			runner.start(e["path"])
 
 
 func _start_bridge() -> void:
-	mode_name = String(_args.get("--mode", "full"))
-	if not MODES.has(mode_name):
-		push_warning("Unknown mode '%s', using 'full'" % mode_name)
-		mode_name = "full"
-	var m: Dictionary = MODES[mode_name]
 	bridge = AimBridge.new()
 	bridge.name = "AimBridge"
 	bridge.shm_name = String(_args.get("--shm", "aimlabs"))
-	bridge.set_mode(m["vision"], m["move"], m["fire"], m["size"])
+	set_mode(String(_args.get("--mode", "full")))
 	bridge.assist_move.connect(func(delta_px: Vector2) -> void: player.add_look_delta(delta_px, Player.LookSource.ASSIST))
 	bridge.assist_fire.connect(player.request_fire_from_assist)
 	bridge.client_connected_changed.connect(func(connected: bool) -> void:
@@ -60,6 +74,17 @@ func _start_bridge() -> void:
 	add_child(bridge)
 	if not bridge.start(get_viewport()):
 		push_error("AimBridge failed to start")
+
+
+## Switch what the external program may see / do (see MODES); works while playing.
+func set_mode(name: String) -> void:
+	if not MODES.has(name):
+		push_warning("Unknown mode '%s', using 'full'" % name)
+		name = "full"
+	mode_name = name
+	var m: Dictionary = MODES[name]
+	if bridge:
+		bridge.set_mode(m["vision"], m["move"], m["fire"], m["size"])
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -118,6 +143,8 @@ func _bridge_hud_text() -> String:
 	if s["client_connected"]:
 		line += "\n%.0f frames/s  copy %.2f ms  cmd %d (%d dropped)  latency %.1f ms" % [
 			s["publish_fps"], s["last_publish_ms"], s["cmds_applied"], s["cmds_dropped"], s["avg_latency_ms"]]
+	if runner and runner.current_path != "":
+		line += "\nAlgo: " + runner.status_text()
 	return line
 
 
