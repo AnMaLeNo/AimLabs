@@ -61,6 +61,8 @@ const RAY_MASK := HITBOX_MASK | WORLD_MASK
 
 func _ready() -> void:
 	_weapon_rest_pos = weapon.position
+	for mi in weapon.find_children("*", "MeshInstance3D", true, false):
+		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	muzzle_flash.visible = false
 	yaw_deg = rad_to_deg(rotation.y)
 

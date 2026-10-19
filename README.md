@@ -142,6 +142,7 @@ game/
   scripts/algo_runner.gd lance/arrête les algos (process + pipes stdout/stderr)
   scripts/algo_menu.gd   menu Échap : liste, Lancer/Arrêter, log, mode
   assets/characters/     Kenney « Blocky Characters » (CC0)
+  assets/weapons/vandal/   « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt)
   bin/                   aimbridge.gdextension + binaires Linux/Windows
 bridge/
   src/protocol.h         layout de la mémoire partagée (version 2 : + clavier/souris)
