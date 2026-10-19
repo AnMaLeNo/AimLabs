@@ -31,6 +31,9 @@ func _build_lighting() -> void:
 	sun.light_energy = 1.1
 	sun.light_color = Color(1.0, 0.96, 0.9)
 	sun.shadow_enabled = true
+	# Lights are culled by Camera3D.cull_mask too: the viewmodel camera only sees
+	# Viewmodel.RENDER_LAYER, so the sun must be on that layer or the arms get sky ambient only.
+	sun.layers = 1 | Viewmodel.RENDER_LAYER
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_4_SPLITS
 	sun.directional_shadow_max_distance = 120.0
 	add_child(sun)

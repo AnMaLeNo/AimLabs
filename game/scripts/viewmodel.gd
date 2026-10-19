@@ -212,6 +212,10 @@ func _load_animations(fp: Dictionary) -> void:
 
 
 ## Play a site keybind clip: "Fire", "Equip", "Reload", "Inspect".
+## Always restarts from frame 0: AnimationPlayer.play() on the animation already playing
+## keeps its current position, which made a chained Fire (automatic weapons, double taps)
+## show one kick every few shots. Like in the game, each shot restarts the clip and only
+## the last shot of a burst plays it to the end.
 func play(action: String) -> void:
 	if not _fp_anims.has(action) or _anim == null:
 		return
@@ -221,6 +225,7 @@ func play(action: String) -> void:
 		var clip := _anim.get_animation(a["name"])
 		var speed := clip.length / seq if seq > 0.0 else 1.0
 		_anim.play(a["name"], 0.0, speed)
+		_anim.seek(0.0, true)
 	var wa := String(a["weapon_anim"])
 	if _weapon_anim:
 		var gn_name := "gn/" + wa
@@ -228,8 +233,10 @@ func play(action: String) -> void:
 			var clip2 := _weapon_anim.get_animation(gn_name)
 			var seq_gn: float = a["seq_gn"]
 			_weapon_anim.play(gn_name, 0.0, clip2.length / seq_gn if seq_gn > 0.0 else 1.0)
+			_weapon_anim.seek(0.0, true)
 		elif _weapon_anim.has_animation(wa):
 			_weapon_anim.play(wa)
+			_weapon_anim.seek(0.0, true)
 
 
 func muzzle_position() -> Vector3:
