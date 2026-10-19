@@ -1,0 +1,3 @@
+# torch avec CUDA d'abord (https://pytorch.org/get-started/locally/), puis :
+ultralytics>=8.3
+pillow

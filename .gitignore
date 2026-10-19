@@ -14,3 +14,7 @@ __pycache__/
 
 # raw downloads of tools/fetch_assets.py
 .ka_cache/
+
+# Poids YOLO téléchargés par algos/yolo_aim.py
+*.pt
+*.engine

@@ -1,0 +1,259 @@
+"""YOLO aim : détection « person » (Ultralytics, GPU) → vise la tête de la cible la plus proche du réticule. CAPSLOCK on/off, ALT maintenu, V tir auto, H tête/corps."""
+
+# Fonctionnement
+#   1. frame RGBA du pont → YOLO (classe COCO 0 = person) sur GPU si dispo (CUDA, FP16) ;
+#   2. la boîte la plus proche du réticule est la cible ; point visé = tête (12 % sous le haut
+#      de la boîte) ou centre du corps (touche H) ;
+#   3. l'erreur en pixels est convertie en degrés avec le FOV de la caméra, et ajoutée au yaw/pitch
+#      que la caméra avait AU MOMENT DE LA CAPTURE (fournis avec la frame) → direction absolue de
+#      la cible ; la commande souris est la différence avec le yaw/pitch ACTUEL du joueur (état
+#      partagé) divisée par la sensibilité du jeu. Les commandes déjà envoyées mais pas encore
+#      visibles dans l'image ne sont jamais comptées deux fois : une seule commande en vol, la
+#      suivante attend une image qui en montre l'effet (pas d'oscillation même avec 100+ ms de
+#      latence), et il n'y a aucun gain à régler ;
+#   4. la direction de la cible est extrapolée de sa vitesse angulaire × latence capture→commande
+#      (compensation du temps d'inférence), désactivable avec --no-lead ; le tir auto part quand la
+#      prédiction précédente s'est vérifiée (résidu < tolérance), le mouvement étant appliqué par le
+#      jeu avant le tir.
+#
+# Réglages par variables d'environnement (le menu du jeu lance le script sans argument) ou
+# en ligne de commande :  AIMLABS_YOLO_MODEL  (yolo11n.pt | yolo11s.pt | ... | mon_modele.engine)
+#                         AIMLABS_YOLO_IMGSZ  (640 par défaut)   AIMLABS_YOLO_DEVICE (cuda:0 | cpu)
+#
+# Banc d'essai hors jeu (vitesse + détections sur des captures PNG) :
+#     python algos/yolo_aim.py --bench dossier_de_png [--model yolo11s.pt --imgsz 640]
+
+import argparse
+import glob
+import math
+import os
+import sys
+import time
+from typing import List, Optional, Tuple
+
+import numpy as np
+
+from aimlabs import AimClient
+
+TOGGLE_KEY = "CAPSLOCK"
+HOLD_KEY = "ALT"
+AUTOFIRE_KEY = "V"
+HEADBODY_KEY = "H"
+
+PERSON_CLASS = 0
+HEAD_RATIO = 0.12          # position de la tête sous le haut de la boîte (fraction de la hauteur)
+FIRE_INTERVAL = 0.10       # s entre deux tirs auto
+FIRE_TOLERANCE = 0.5       # tir auto si le résidu de suivi < 50 % de la demi-largeur de la boîte
+MAX_STEP_PX = 600.0        # borne d'une commande souris (42° à sens 0,07 : un flick, pas un tour)
+STATS_EVERY = 2.0          # s
+
+
+def parse_args(argv: List[str]) -> argparse.Namespace:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--model", default=os.environ.get("AIMLABS_YOLO_MODEL", "yolo11n.pt"))
+    ap.add_argument("--imgsz", type=int, default=int(os.environ.get("AIMLABS_YOLO_IMGSZ", "640")))
+    ap.add_argument("--device", default=os.environ.get("AIMLABS_YOLO_DEVICE", ""), help="cuda:0, cpu… (auto)")
+    ap.add_argument("--conf", type=float, default=0.35)
+    ap.add_argument("--smooth", type=float, default=1.0, help="fraction de l'erreur corrigée par frame (1 = instantané)")
+    ap.add_argument("--no-lead", action="store_true", help="pas d'extrapolation du mouvement de la cible")
+    ap.add_argument("--no-half", action="store_true", help="FP32 même sur GPU")
+    ap.add_argument("--debug", action="store_true", help="trace par frame (boîtes, erreur, commande)")
+    ap.add_argument("--bench", metavar="DIR", help="mesure hors jeu sur les PNG d'un dossier")
+    return ap.parse_args(argv)
+
+
+class Detector:
+    """Enveloppe Ultralytics : device auto, FP16 sur CUDA, préchauffe, boîtes « person » filtrées."""
+
+    def __init__(self, model: str, imgsz: int, device: str, conf: float, half: bool) -> None:
+        import torch
+        from ultralytics import YOLO
+
+        import ultralytics
+
+        self.device = device or ("cuda:0" if torch.cuda.is_available() else "cpu")
+        self._has_quantize = tuple(int(v) for v in ultralytics.__version__.split(".")[:2]) >= (8, 4)  # half → quantize
+        self.half = half and self.device.startswith("cuda")
+        self.imgsz, self.conf = imgsz, conf
+        self.model = YOLO(model)
+        self.name = f"{os.path.basename(model)} @{imgsz} {self.device}{' fp16' if self.half else ''}"
+        self.last_ms = 0.0
+        self.model.predict(np.zeros((imgsz, imgsz, 3), np.uint8), **self._kw())  # warm-up (alloc CUDA, cuDNN)
+
+    def _kw(self) -> dict:
+        kw = dict(imgsz=self.imgsz, conf=self.conf, classes=[PERSON_CLASS], device=self.device, verbose=False)
+        if self.half:
+            kw["quantize" if self._has_quantize else "half"] = 16 if self._has_quantize else True
+        return kw
+
+    def boxes(self, rgb: np.ndarray) -> List[Tuple[float, float, float, float, float]]:
+        """[(x1, y1, x2, y2, conf)] sans le viewmodel (boîte large collée au bas de l'image)."""
+        t0 = time.perf_counter()
+        r = self.model.predict(rgb, **self._kw())[0]
+        self.last_ms = (time.perf_counter() - t0) * 1000.0
+        h = rgb.shape[0]
+        out = []
+        for (x1, y1, x2, y2), c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist()):
+            bw, bh = x2 - x1, y2 - y1
+            if y2 > 0.97 * h and bh < 1.2 * bw:  # bras + arme du joueur : large, tronqué par le bas
+                continue
+            out.append((x1, y1, x2, y2, c))
+        return out
+
+
+def pick_target(boxes, cx: float, cy: float, head: bool) -> Optional[Tuple[float, float, float, float]]:
+    """(aim_x, aim_y, half_w, half_h) de la boîte dont le point visé est le plus proche du réticule."""
+    best = None
+    for x1, y1, x2, y2, _c in boxes:
+        ax = (x1 + x2) / 2
+        ay = y1 + (y2 - y1) * HEAD_RATIO if head else (y1 + y2) / 2
+        d = (ax - cx) ** 2 + (ay - cy) ** 2
+        if best is None or d < best[0]:
+            best = (d, ax, ay, (x2 - x1) / 2, (y2 - y1) / 2)
+    return None if best is None else best[1:]
+
+
+def px_to_deg(ex: float, ey: float, height: int, fov_deg: float) -> Tuple[float, float]:
+    """Erreur écran (px, x à droite, y en bas) → angles (deg) via le FOV vertical de la caméra."""
+    focal = (height / 2.0) / math.tan(math.radians(fov_deg) / 2.0)
+    return math.degrees(math.atan2(ex, focal)), math.degrees(math.atan2(ey, focal))
+
+
+def wrap180(a: float) -> float:
+    return (a + 180.0) % 360.0 - 180.0
+
+
+def bench(args: argparse.Namespace) -> int:
+    files = sorted(glob.glob(os.path.join(args.bench, "*.png")))
+    if not files:
+        print(f"aucun PNG dans {args.bench}", file=sys.stderr)
+        return 1
+    from PIL import Image
+    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half)
+    imgs = [np.asarray(Image.open(f).convert("RGB")) for f in files]
+    times, found = [], 0
+    for img in imgs:
+        b = det.boxes(img)
+        times.append(det.last_ms)
+        found += bool(b)
+    print(f"{det.name}: {len(files)} images, détection sur {found}/{len(files)}, "
+          f"inférence {np.mean(times):.1f} ms/frame (min {min(times):.1f}, max {max(times):.1f})")
+    return 0
+
+
+def main(argv: List[str]) -> int:
+    args = parse_args(argv)
+    if args.bench:
+        return bench(args)
+
+    det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half)
+    enabled, autofire, head = False, False, True
+    prev: Optional[Tuple[float, float, float]] = None  # (aim_x, aim_y, capture_usec) pour la vitesse écran
+    last_fire = 0.0
+    n_frames, n_det, t_stats, ms_acc = 0, 0, time.monotonic(), 0.0
+
+    with AimClient() as c:
+        # Une seule commande en vol : on attend que le jeu l'ait consommée (compteur
+        # cmds_applied + cmds_dropped) puis une frame capturée après (f.id > tick), avant de
+        # mesurer à nouveau — pas de double comptage possible, quelle que soit la latence.
+        st0 = c.state()
+        n_sent = st0["cmds_applied"] + st0["cmds_dropped"]
+        waiting_idx: Optional[int] = None
+        applied_tick: Optional[int] = None
+        print(f"yolo_aim connecté, mode {c.mode}, modèle {det.name}. {TOGGLE_KEY}: on/off, "
+              f"{HOLD_KEY} maintenu: vise, {AUTOFIRE_KEY}: tir auto, {HEADBODY_KEY}: tête/corps", flush=True)
+        while True:
+            f = c.frame(timeout=2.0)
+            if f is None:
+                if not c.game_alive():
+                    print("jeu fermé", flush=True)
+                    return 0
+                continue
+            k = c.keys()
+            if TOGGLE_KEY in k.just_pressed:
+                enabled = not enabled
+                print("aim", "ON" if enabled else "OFF", flush=True)
+            if AUTOFIRE_KEY in k.just_pressed:
+                autofire = not autofire
+                print("tir auto", "ON" if autofire else "OFF", flush=True)
+            if HEADBODY_KEY in k.just_pressed:
+                head = not head
+                print("vise :", "tête" if head else "corps", flush=True)
+            active = enabled or HOLD_KEY in k
+            if active and waiting_idx is not None:
+                st = c.state()
+                if applied_tick is None and st["cmds_applied"] + st["cmds_dropped"] >= waiting_idx:
+                    applied_tick = st["tick"]
+                if applied_tick is None or f.id <= applied_tick:
+                    continue  # cette image ne montre pas encore l'effet de la commande précédente
+                waiting_idx = applied_tick = None
+
+            boxes = det.boxes(np.ascontiguousarray(f.image[..., :3])) if active else []
+            n_frames += 1
+            ms_acc += det.last_ms if active else 0.0
+            now = time.monotonic()
+            if now - t_stats > STATS_EVERY:
+                if active:
+                    print(f"[stats] {n_frames / (now - t_stats):.0f} frames/s, inférence {ms_acc / max(n_frames, 1):.1f} ms, "
+                          f"cible vue {n_det}/{n_frames}", flush=True)
+                n_frames, n_det, ms_acc, t_stats = 0, 0, 0.0, now
+            if not active:
+                prev = None
+                continue
+
+            cx, cy = f.width / 2.0, f.height / 2.0
+            tgt = pick_target(boxes, cx, cy, head)
+            if tgt is None:
+                prev = None
+                continue
+            n_det += 1
+            ax, ay, half_w, _half_h = tgt
+            # direction absolue de la cible : angles de la caméra à la capture + erreur écran
+            # (le jeu fait yaw -= dx·sens et pitch -= dy·sens, x écran à droite, y en bas)
+            yaw_err, pitch_err = px_to_deg(ax - cx, ay - cy, f.height, f.fov)
+            tgt_yaw, tgt_pitch = wrap180(f.yaw - yaw_err), f.pitch - pitch_err
+            half_w_deg = px_to_deg(half_w, 0.0, f.height, f.fov)[0]
+
+            st = c.state()
+            aim_yaw, aim_pitch = tgt_yaw, tgt_pitch
+            if not args.no_lead:
+                # latence capture→maintenant (horloge du jeu) + une frame de jeu pour l'application
+                latency_s = max(st["time_usec"] - f.capture_usec, 0) / 1e6 + 1.0 / max(st["fps"], 1.0)
+                if prev is not None and f.capture_usec > prev[2]:
+                    dt = (f.capture_usec - prev[2]) / 1e6
+                    dyaw, dpitch = wrap180(tgt_yaw - prev[0]), tgt_pitch - prev[1]
+                    jump = math.hypot(dyaw, dpitch)
+                    # suivi continu (dt court) et saut plausible (< 4 demi-largeurs, sinon autre
+                    # cible / faux positif) ; avance bornée à une largeur de boîte
+                    if dt < 0.6 and jump < 4.0 * half_w_deg:
+                        lead = min(latency_s / dt, 2.0 * half_w_deg / max(jump, 1e-6))
+                        aim_yaw, aim_pitch = wrap180(tgt_yaw + dyaw * lead), tgt_pitch + dpitch * lead
+                prev = (tgt_yaw, tgt_pitch, f.capture_usec)
+
+            # rien en vol : l'état du jeu est la caméra réelle (souris humaine comprise)
+            cam_yaw, cam_pitch = st["yaw"], st["pitch"]
+            # résidu = écart entre où la caméra est et où la cible est prédite : petit ⇒ suivi calé
+            res_yaw, res_pitch = wrap180(cam_yaw - aim_yaw), cam_pitch - aim_pitch
+            dx = res_yaw / st["sens"] * args.smooth
+            dy = res_pitch / st["sens"] * args.smooth
+            dx = max(-MAX_STEP_PX, min(MAX_STEP_PX, dx))
+            dy = max(-MAX_STEP_PX, min(MAX_STEP_PX, dy))
+            if c.move(dx, dy, frame_id=f.id):
+                n_sent += 1
+                waiting_idx = n_sent
+            tol_deg = max(FIRE_TOLERANCE * half_w_deg, 0.1)
+            fired = autofire and abs(res_yaw) < tol_deg and abs(res_pitch) < tol_deg and now - last_fire > FIRE_INTERVAL
+            if fired and c.fire(frame_id=f.id):
+                n_sent += 1
+                waiting_idx = n_sent
+                last_fire = now
+            if args.debug:
+                print(f"[dbg] frame {f.id} boîtes {len(boxes)} cible ({tgt_yaw:.2f},{tgt_pitch:.2f})° "
+                      f"visée ({aim_yaw:.2f},{aim_pitch:.2f})° cam ({cam_yaw:.2f},{cam_pitch:.2f})° "
+                      f"résidu ({res_yaw:.2f},{res_pitch:.2f})° tol {tol_deg:.2f} souris ({dx:.0f},{dy:.0f}) "
+                      f"{'TIR ' if fired else ''}inf {det.last_ms:.0f} ms", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
