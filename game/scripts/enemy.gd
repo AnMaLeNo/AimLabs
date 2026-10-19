@@ -27,6 +27,9 @@ const HEAD_RADIUS := 0.12
 @export var agent_slug := ""
 @export var max_hp := 100
 @export var respawn_delay := 3.0
+## Shooting range: neutral A-pose (the site's plain "Idle" clip) instead of the
+## character-select idle; the site has no walk/run clips.
+@export var neutral_pose := false
 
 var hp: int
 var alive := true
@@ -72,7 +75,7 @@ func _build_model() -> void:
 	var players := _model.find_children("*", "AnimationPlayer", true, false)
 	if players.size() > 0:
 		_anim = players[0]
-		_idle = KAAssets.pick_idle(_anim)
+		_idle = "Idle" if neutral_pose and _anim.has_animation("Idle") else ("" if neutral_pose else KAAssets.pick_idle(_anim))
 		if _idle != "":
 			_anim.get_animation(_idle).loop_mode = Animation.LOOP_LINEAR
 		_play_idle()

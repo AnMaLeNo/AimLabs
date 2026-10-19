@@ -13,6 +13,12 @@ extends Node
 ##   --python=<cmd>        interpreter used to run algos (default: python3 / python)
 ##   --agent=<slug>        first-person arms (Kingdom Archives agent, default: jett)
 ##   --weapon=<slug>       held weapon (Kingdom Archives weapon, default: classic)
+##   --map=<name>          showcase (default) | range (shooting range, see World)
+##   --target=<slug>       range: agent used as the moving target (default: jett)
+##   --pattern=<name>      range: none | line | square | circle (default: line)
+##   --size=<m>            range: travel (line) / side (square) / radius (circle), default 4
+##   --speed=<m/s>         range: speed along the path (default: 2)
+##   --distance=<m>        range: distance spawn -> pattern centre (default: 10)
 
 ## Game modes = what the external program is allowed to see / do.
 const MODES := {
@@ -57,6 +63,18 @@ func _ready() -> void:
 	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
 	set_weapon(String(_args.get("--weapon", "classic")))
 	set_agent(String(_args.get("--agent", "jett")))
+	if _args.has("--pattern"):
+		world.set_pattern(String(_args["--pattern"]))
+	if _args.has("--size"):
+		world.set_pattern_size(float(_args["--size"]))
+	if _args.has("--speed"):
+		world.set_pattern_speed(float(_args["--speed"]))
+	if _args.has("--distance"):
+		world.set_range_distance(float(_args["--distance"]))
+	if _args.has("--target"):
+		world.target_slug = String(_args["--target"])
+	if _args.has("--map"):
+		world.set_map(String(_args["--map"]))
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)

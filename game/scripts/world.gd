@@ -1,9 +1,15 @@
 class_name World
 extends Node3D
-## Flat test range: an infinite ground, every Kingdom Archives agent standing in a line
-## facing the spawn, and every weapon laid on the ground in front of them.
+## Flat world with two maps:
+##   showcase : every Kingdom Archives agent standing in a line facing the spawn, every
+##              weapon laid on the ground in front of them;
+##   range    : shooting range — one chosen agent (neutral pose) moving along a chosen
+##              pattern (line / square / circle, see TargetMover) to test aim algorithms.
 
 signal targets_rebuilt(enemies: Array)
+signal map_changed(map: String)
+
+const MAPS: Array[String] = ["showcase", "range"]
 
 @export var line_distance := 12.0  # metres in front of the spawn
 @export var agent_spacing := 2.0
@@ -16,12 +22,109 @@ const GROUND_SIZE := 6000.0
 var enemies: Array[Enemy] = []
 var assets_missing := false
 
+var map := "showcase"
+# Shooting range settings (applied live through the setters below).
+var range_distance := 10.0   # metres between the spawn and the pattern centre
+var target_slug := "jett"
+var pattern := "line"
+var pattern_size := 4.0
+var pattern_speed := 2.0
+var target: Enemy
+var mover: TargetMover
+
 
 func _ready() -> void:
 	_build_lighting()
 	_build_ground()
-	_build_enemies()
-	_build_weapons()
+	_build_map()
+
+
+func set_map(name: String) -> bool:
+	if not MAPS.has(name):
+		push_warning("Unknown map '%s' (maps: %s)" % [name, ", ".join(MAPS)])
+		return false
+	if name == map and not enemies.is_empty():
+		return true
+	map = name
+	_build_map()
+	return true
+
+
+func set_target_agent(slug: String) -> bool:
+	if not KAAssets.agents().has(slug):
+		push_warning("Unknown agent '%s'" % slug)
+		return false
+	target_slug = slug
+	if map == "range":
+		_build_map()
+	return true
+
+
+func set_pattern(p: String) -> bool:
+	if not TargetMover.PATTERNS.has(p):
+		push_warning("Unknown pattern '%s' (patterns: %s)" % [p, ", ".join(TargetMover.PATTERNS)])
+		return false
+	pattern = p
+	if mover:
+		mover.configure(pattern, pattern_size, pattern_speed)
+	return true
+
+
+func set_pattern_size(v: float) -> void:
+	pattern_size = maxf(v, 0.0)
+	if mover:
+		mover.configure(pattern, pattern_size, pattern_speed)
+
+
+func set_pattern_speed(v: float) -> void:
+	pattern_speed = maxf(v, 0.0)
+	if mover:
+		mover.configure(pattern, pattern_size, pattern_speed)
+
+
+func set_range_distance(v: float) -> void:
+	range_distance = maxf(v, 1.0)
+	if mover:
+		mover.recentre(Vector3(0.0, 0.0, -range_distance))
+
+
+func _build_map() -> void:
+	for n in ["Enemies", "Weapons"]:
+		var old := get_node_or_null(n)
+		if old:
+			remove_child(old)
+			old.queue_free()
+	enemies.clear()
+	target = null
+	mover = null
+	match map:
+		"range":
+			_build_range()
+		_:
+			_build_enemies()
+			_build_weapons()
+	map_changed.emit(map)
+
+
+## One agent in a neutral pose, moving along the chosen pattern and always facing the spawn.
+func _build_range() -> void:
+	var holder := Node3D.new()
+	holder.name = "Enemies"
+	add_child(holder)
+	assets_missing = KAAssets.agent_slugs().is_empty()
+	target = Enemy.new()
+	target.name = "Target_%s" % target_slug
+	target.agent_slug = target_slug
+	target.neutral_pose = true
+	target.position = Vector3(0.0, 0.0, -range_distance)
+	mover = TargetMover.new()
+	mover.name = "Mover"
+	mover.face_point = Vector3.ZERO
+	target.add_child(mover)
+	holder.add_child(target)
+	mover.configure(pattern, pattern_size, pattern_speed)
+	enemies.append(target)
+	targets_rebuilt.emit(enemies)
 
 
 func _build_lighting() -> void:

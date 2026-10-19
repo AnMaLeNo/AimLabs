@@ -16,6 +16,14 @@ var _stop_btn: Button
 var _mode_btn: OptionButton
 var _agent_btn: OptionButton
 var _weapon_btn: OptionButton
+var _map_btn: OptionButton
+var _target_btn: OptionButton
+var _pattern_btn: OptionButton
+var _size_label: Label
+var _size_box: SpinBox
+var _speed_box: SpinBox
+var _distance_box: SpinBox
+var _range_row: HBoxContainer
 var _bridge_label: Label
 var _log_dirty := true
 
@@ -114,6 +122,7 @@ func _build() -> void:
 	right.add_child(_log)
 
 	var bottom := HBoxContainer.new()
+	_build_map_rows(root)
 	root.add_child(bottom)
 	var agent_label := Label.new()
 	agent_label.text = "Personnage :"
@@ -165,6 +174,87 @@ func _build() -> void:
 	resume.text = "Reprendre"
 	resume.pressed.connect(func() -> void: game.player.set_mouse_captured(true))
 	bottom.add_child(resume)
+
+
+const PATTERN_LABELS := {"none": "Immobile", "line": "Gauche-droite", "square": "Carré", "circle": "Cercle"}
+const SIZE_LABELS := {"none": "Taille (m) :", "line": "Distance du trajet (m) :", "square": "Côté du carré (m) :", "circle": "Rayon du cercle (m) :"}
+
+
+## Map selector + shooting-range settings (target agent, movement, size, speed, distance).
+func _build_map_rows(root: VBoxContainer) -> void:
+	var world: World = game.world
+	var map_row := HBoxContainer.new()
+	map_row.add_theme_constant_override("separation", 8)
+	root.add_child(map_row)
+	var map_label := Label.new()
+	map_label.text = "Map :"
+	map_row.add_child(map_label)
+	_map_btn = OptionButton.new()
+	_map_btn.add_item("Vitrine (tous les agents, toutes les armes)")
+	_map_btn.set_item_metadata(0, "showcase")
+	_map_btn.add_item("Stand de tir (une cible mobile)")
+	_map_btn.set_item_metadata(1, "range")
+	_map_btn.select(1 if world.map == "range" else 0)
+	_map_btn.item_selected.connect(func(i: int) -> void:
+		world.set_map(String(_map_btn.get_item_metadata(i)))
+		_range_row.visible = world.map == "range")
+	map_row.add_child(_map_btn)
+
+	_range_row = HBoxContainer.new()
+	_range_row.add_theme_constant_override("separation", 8)
+	_range_row.visible = world.map == "range"
+	root.add_child(_range_row)
+	var target_label := Label.new()
+	target_label.text = "Cible :"
+	_range_row.add_child(target_label)
+	_target_btn = OptionButton.new()
+	var agents := KAAssets.agents()
+	for slug in KAAssets.agent_slugs():
+		_target_btn.add_item(String(agents[slug]["name"]))
+		_target_btn.set_item_metadata(_target_btn.item_count - 1, slug)
+		if slug == world.target_slug:
+			_target_btn.select(_target_btn.item_count - 1)
+	_target_btn.item_selected.connect(func(i: int) -> void: world.set_target_agent(String(_target_btn.get_item_metadata(i))))
+	_range_row.add_child(_target_btn)
+	var pattern_label := Label.new()
+	pattern_label.text = "Mouvement :"
+	_range_row.add_child(pattern_label)
+	_pattern_btn = OptionButton.new()
+	for p in TargetMover.PATTERNS:
+		_pattern_btn.add_item(String(PATTERN_LABELS.get(p, p)))
+		_pattern_btn.set_item_metadata(_pattern_btn.item_count - 1, p)
+		if p == world.pattern:
+			_pattern_btn.select(_pattern_btn.item_count - 1)
+	_pattern_btn.item_selected.connect(func(i: int) -> void:
+		world.set_pattern(String(_pattern_btn.get_item_metadata(i)))
+		_size_label.text = String(SIZE_LABELS.get(world.pattern, "Taille (m) :")))
+	_range_row.add_child(_pattern_btn)
+	_size_label = Label.new()
+	_size_label.text = String(SIZE_LABELS.get(world.pattern, "Taille (m) :"))
+	_range_row.add_child(_size_label)
+	_size_box = _spin(0.5, 30.0, 0.5, world.pattern_size, func(v: float) -> void: world.set_pattern_size(v))
+	_range_row.add_child(_size_box)
+	var speed_label := Label.new()
+	speed_label.text = "Vitesse (m/s) :"
+	_range_row.add_child(speed_label)
+	_speed_box = _spin(0.0, 20.0, 0.25, world.pattern_speed, func(v: float) -> void: world.set_pattern_speed(v))
+	_range_row.add_child(_speed_box)
+	var dist_label := Label.new()
+	dist_label.text = "Distance (m) :"
+	_range_row.add_child(dist_label)
+	_distance_box = _spin(2.0, 60.0, 1.0, world.range_distance, func(v: float) -> void: world.set_range_distance(v))
+	_range_row.add_child(_distance_box)
+
+
+func _spin(min_v: float, max_v: float, step: float, value: float, on_change: Callable) -> SpinBox:
+	var box := SpinBox.new()
+	box.min_value = min_v
+	box.max_value = max_v
+	box.step = step
+	box.value = value
+	box.custom_minimum_size.x = 90
+	box.value_changed.connect(on_change)
+	return box
 
 
 func _selected_entry() -> Dictionary:
