@@ -133,6 +133,20 @@ pendant que le menu est ouvert (pratique pour lire son log en direct). Options :
   `ALT` maintenu = vise tant qu'appuyé, `V` tir auto on/off. Heuristique couleur (pixels
   « peau »), à remplacer par ta propre vision.
 * `algos/skin_bot.py` — bot jouet toujours actif (vise + tire), juste pour prouver la boucle.
+* `algos/yolo_aim.py` — **détection de personnes par YOLO** (Ultralytics, modèle COCO pré-entraîné
+  `yolo11n.pt` par défaut, GPU/FP16 si CUDA) : vise la tête de la cible la plus proche du réticule,
+  conversion pixels→souris exacte (FOV + sensibilité lus dans l'état partagé), extrapolation du
+  mouvement de la cible × latence capture→commande. `CAPSLOCK` on/off, `ALT` maintenu, `V` tir auto,
+  `H` tête/corps. Installer `torch` avec CUDA (https://pytorch.org/get-started/locally/) puis
+  `pip install -r algos/requirements-yolo.txt` (+ `pip install tensorrt` pour le moteur rapide).
+  Sur CUDA l'algo exporte et met en cache un moteur TensorRT FP16 (`yolo11n_384x640.engine`,
+  2–4 min la première fois, à faire jeu fermé avec `python algos/yolo_aim.py --export`) et fait
+  pré-traitement + NMS lui-même : **5 ms/frame mesurés sur
+  RTX 3080** (yolo11n comme yolo11s) contre 17–29 ms via `model.predict()`, dont le surcoût
+  Python/CUDA sous Windows domine (`--no-trt` pour comparer). Réglages : `AIMLABS_YOLO_MODEL`
+  (`yolo11s.pt`, un `.engine` déjà exporté…), `AIMLABS_YOLO_IMGSZ`, `AIMLABS_YOLO_DEVICE`. Banc
+  hors jeu : `python algos/yolo_aim.py --bench <dossier_png>` donne les ms/frame et le taux de
+  détection.
 
 ### Compiler le pont
 
@@ -197,7 +211,7 @@ sdk/python/
   aimlabs/client.py      AimClient (frame, state, keys, move, fire)
   aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
   examples/              bridge_selftest.py
-algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py
+algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py, yolo_aim.py (YOLO)
 tools/fetch_assets.py    télécharge/convertit les assets Kingdom Archives
 ```
 

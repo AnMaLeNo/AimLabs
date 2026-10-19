@@ -1,0 +1,4 @@
+# torch avec CUDA d'abord (https://pytorch.org/get-started/locally/), puis :
+ultralytics>=8.3
+tensorrt  # optionnel : moteur FP16 rapide sur CUDA (Windows/Linux x86_64)
+pillow
