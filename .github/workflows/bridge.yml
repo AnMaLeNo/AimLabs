@@ -1,0 +1,48 @@
+name: AimBridge
+
+on:
+  push:
+    paths: ["bridge/**", "sdk/**", ".github/workflows/bridge.yml"]
+  pull_request:
+    paths: ["bridge/**", "sdk/**", ".github/workflows/bridge.yml"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            platform: linux
+            artifact: libaimbridge.linux.template_release.x86_64.so
+          - os: windows-2022
+            platform: windows
+            artifact: libaimbridge.windows.template_release.x86_64.dll
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install scons
+      - name: Build
+        working-directory: bridge
+        run: scons platform=${{ matrix.platform }} arch=x86_64 target=template_release api_version=4.7 -j4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: game/bin/${{ matrix.artifact }}
+
+  sdk:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install numpy
+      - run: python -c "import aimlabs.protocol"
+        working-directory: sdk/python

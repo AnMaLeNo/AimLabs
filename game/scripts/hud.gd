@@ -15,10 +15,15 @@ var kills := 0
 var _hitmarker_time := 0.0
 var _hitmarker_color := Color.WHITE
 var _frame_times: Array[float] = []
+## Extra line(s) about the AimBridge, set by the scene root.
+var bridge_text := ""
 
 
 func _ready() -> void:
 	crosshair.draw.connect(_draw_crosshair)
+	overlay_label.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
+	overlay_label.offset_bottom = -16.0
+	overlay_label.add_theme_font_size_override("font_size", 14)
 	set_mouse_captured(false)
 
 
@@ -36,13 +41,15 @@ func _process(delta: float) -> void:
 	var accuracy := 100.0 * hits / shots if shots > 0 else 0.0
 	stats_label.text = "%d FPS  (%.1f ms)\nShots %d  Hits %d  (%.0f%%)\nHeadshots %d  Kills %d" % [
 		Engine.get_frames_per_second(), avg * 1000.0, shots, hits, accuracy, headshots, kills]
+	if bridge_text != "":
+		stats_label.text += "\n" + bridge_text
 
 
 func set_mouse_captured(captured: bool) -> void:
 	overlay.visible = not captured
 	hint_label.visible = captured
 	if not captured:
-		overlay_label.text = "AimLabs\n\nClick to play\n\nWASD move · Shift sprint · Space jump\nLeft click shoot · T reset targets · Esc release mouse"
+		overlay_label.text = "WASD move · Shift sprint · Space jump · Left click shoot · T reset targets · Esc menu"
 
 
 func on_shot_fired(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> void:

@@ -11,10 +11,12 @@ de vision du joueur. Le meilleur joueur est celui dont le programme vise le mieu
 **Partie 1 — sandbox FPS** (ce dépôt, en cours) : déplacement, tir hitscan,
 cibles humanoïdes statiques, arène quasi infinie avec blocs et murs.
 
-**Partie 2 — AimBridge** (à venir) : GDExtension C++ qui copie chaque frame dans
-une mémoire partagée et accepte des commandes `move(dx, dy)` / `shoot()`, avec un
-SDK Python. Le jeu distingue déjà la souris réelle de la souris « assistée »
-(`Player.LookSource.REAL` / `ASSIST`).
+**Partie 2 — AimBridge** (fait, à valider sur GPU) : GDExtension C++ (`bridge/`)
+qui publie chaque frame rendue et l'état du joueur dans une **mémoire partagée**
+et applique les commandes `move(dx, dy)` / `fire()` qu'un programme externe y écrit.
+Le jeu distingue la souris réelle de la souris « assistée »
+(`Player.LookSource.REAL` / `ASSIST`) et mesure la latence frame → commande.
+SDK Python dans `sdk/python/` (`AimClient`).
 
 ## Lancer
 
@@ -28,9 +30,91 @@ godot --path game
 Sans GPU (VM, CI) : `godot --path game --rendering-method gl_compatibility`.
 
 Commandes : WASD déplacer · Shift sprint · Espace saut · clic gauche tirer ·
-T réinitialiser les cibles · Échap libérer / clic recapturer la souris.
+T réinitialiser les cibles · Échap menu des algos (libère la souris) / clic hors du menu pour reprendre.
+
+## AimBridge (interface pour l'aide à la visée)
+
+Le jeu démarre le pont automatiquement (désactiver : `-- --bridge=off`). Côté programme :
+
+```python
+from aimlabs import AimClient          # pip install -e sdk/python  (numpy)
+
+with AimClient() as c:                 # s'attache à la mémoire partagée "aimlabs"
+    while True:
+        f = c.frame()                  # attend la frame suivante : f.image = (H, W, 4) uint8 RGBA
+        dx, dy = ma_pipeline(f.image)  # ... vision ...
+        c.move(dx, dy, frame_id=f.id)  # pixels de souris (x droite, y bas)
+        c.fire(frame_id=f.id)          # un tir (cadence de l'arme respectée)
+        s = c.state()                  # pos, vel, yaw, pitch, touches, souris réelle/assistée,
+                                       # shots/hits/kills, latence mesurée par le jeu...
+```
+
+* **Capture** : sur Vulkan/D3D12 (Forward+/Mobile), lecture GPU→CPU asynchrone
+  (`RenderingDevice.texture_get_data_async`, ne bloque pas le rendu) ; en Compatibility
+  (OpenGL), lecture synchrone. La copie en mémoire partagée se fait dans un thread dédié.
+* **Mémoire partagée** : `/dev/shm/aimlabs` (Linux) ou mapping nommé `aimlabs` (Windows).
+  Layout dans `bridge/src/protocol.h` (miroir `sdk/python/aimlabs/protocol.py`) :
+  en-tête, bloc état (seqlock), anneau de commandes (client → jeu), 3 slots de frame (seqlock).
+  N'importe quel langage capable de mmap peut s'y brancher.
+* **Latence** : chaque commande porte l'id de la frame qui l'a motivée ; le jeu mesure
+  `capture → application` avec sa propre horloge (affiché dans le HUD et dans `state()`).
+* **Modes de jeu** (`-- --mode=<nom>`) : `full` (défaut), `lowres` (image fournie en 640×360),
+  `tiny` (320×180), `aim_only` (tir refusé), `fire_only` (visée refusée), `blind` (pas d'image).
+  Les commandes refusées sont comptées dans `cmds_dropped`. Définis dans `game/scripts/game.gd`.
+* **Clavier / souris du joueur** : l'état publie les touches enfoncées (keycodes Godot,
+  disposition *et* physiques) et les boutons de souris, pour que la pipeline réagisse aux
+  touches du joueur (modes, réglages, « vise seulement tant que j'appuie »…) :
+
+  ```python
+  k = c.keys()                 # instantané : k.down, k.physical_down, k.mouse_down (frozensets de noms)
+  if "CAPSLOCK" in k.just_pressed: enabled = not enabled    # transitions depuis le keys() précédent
+  if "ALT" in k: ...           # maintenu ; noms : "A".."Z", "0".."9", "SPACE", "SHIFT", "CTRL",
+                               # "ALT", "F1".."F12", "KP_0"…, souris "LEFT"/"RIGHT"/"MIDDLE"/"XBUTTON1"…
+  ```
+
+  L'état est échantillonné à chaque frame du jeu : un appui plus court qu'une frame peut
+  être manqué.
+* **Exemples** : `sdk/python/examples/bridge_selftest.py` (test de bout en bout) et le dossier
+  `algos/` (voir ci-dessous).
+
+### Menu Échap : lancer ses algos sans quitter le jeu
+
+`Échap` ouvre le menu **Algos** : il liste les `*.py` du dossier `algos/` (première ligne de la
+docstring en description), **Lancer / Basculer / Relancer / Arrêter** le process depuis le jeu,
+affiche sa sortie (stdout + stderr, donc les tracebacks) et le statut (en cours / terminé avec
+code), et permet de changer de mode de jeu à chaud. Le jeu lance le script avec `python3`
+(`python` sous Windows, ou `--python=<cmd>` / `AIMLABS_PYTHON`), `PYTHONPATH` sur `sdk/python`
+et `AIMLABS_SHM` sur le segment courant ; il le tue en quittant. L'algo continue de jouer
+pendant que le menu est ouvert (pratique pour lire son log en direct). Options : `--algos=<dossier>`, `--algo=<fichier.py>`
+(lance au démarrage).
+
+* `algos/auto_aim.py` — vise seul la cible la plus proche du réticule : `CAPSLOCK` on/off,
+  `ALT` maintenu = vise tant qu'appuyé, `V` tir auto on/off. Heuristique couleur (pixels
+  « peau »), à remplacer par ta propre vision.
+* `algos/skin_bot.py` — bot jouet toujours actif (vise + tire), juste pour prouver la boucle.
+
+### Compiler le pont
+
+Binaries Linux et Windows x86_64 (release) sont commités dans `game/bin/` et rebuildés par
+la CI (`.github/workflows/bridge.yml`). Pour recompiler :
+
+```sh
+git submodule update --init          # bridge/godot-cpp
+pip install scons
+cd bridge
+scons platform=linux target=template_release api_version=4.7 -j8
+scons platform=windows arch=x86_64 target=template_release api_version=4.7 use_mingw=yes -j8  # cross-compile
+```
 
 ## Vérifications automatiques
+
+Test de bout en bout du pont (lance le jeu, lit des frames, envoie `move` + `fire`, vérifie
+l'état, mesure la latence) :
+
+```sh
+python sdk/python/examples/bridge_selftest.py --launch --godot godot [--mode lowres]
+# sur une machine sans GPU : --godot-args "--rendering-method gl_compatibility"
+```
 
 ```sh
 # importe les assets (à faire une fois, ou après ajout d'assets)
@@ -54,9 +138,22 @@ game/
   scripts/enemy.gd       cible humanoïde : hitboxes tête/corps/bras, PV, respawn
   scripts/world.gd       génération procédurale (seed), lumière, ciel, brouillard
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
-  scripts/game.gd        câblage + options --smoke-test / --screenshot
+  scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
+  scripts/algo_runner.gd lance/arrête les algos (process + pipes stdout/stderr)
+  scripts/algo_menu.gd   menu Échap : liste, Lancer/Arrêter, log, mode
   assets/characters/     Kenney « Blocky Characters » (CC0)
   assets/weapons/vandal/   « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt)
+  bin/                   aimbridge.gdextension + binaires Linux/Windows
+bridge/
+  src/protocol.h         layout de la mémoire partagée (version 2 : + clavier/souris)
+  src/aim_bridge.*       nœud AimBridge : capture, thread de publication, commandes, état
+  src/shared_memory.*    shm POSIX / file mapping Windows
+  godot-cpp/             sous-module (bindings C++, API 4.7)
+sdk/python/
+  aimlabs/client.py      AimClient (frame, state, keys, move, fire)
+  aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
+  examples/              bridge_selftest.py
+algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py
 ```
 
 Couches physiques : 1 `world`, 2 `player`, 3 `enemy_body`, 4 `enemy_head`.

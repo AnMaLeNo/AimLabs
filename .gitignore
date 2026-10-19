@@ -3,3 +3,11 @@ game/.godot/
 game/export/
 *.import.tmp
 .DS_Store
+
+# GDExtension build
+bridge/src/*.o
+bridge/src/*.os
+bridge/.sconsign.dblite
+bridge/.sconf_temp/
+__pycache__/
+*.egg-info/
