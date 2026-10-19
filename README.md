@@ -45,6 +45,18 @@ pour les armes automatiques) · R recharger · F inspecter · T réinitialiser l
 Options : `-- --agent=<slug> --weapon=<slug>` (défaut `jett` / `classic`, slugs = noms
 des dossiers de `game/assets/ka/agents/` et `weapons/`).
 
+### Maps
+
+* **Vitrine** (défaut) : les 29 agents en ligne, les 24 armes au sol.
+* **Stand de tir** : une seule cible (agent au choix, pose neutre — le site n'a pas
+  d'animation de marche) qui se déplace devant le joueur en lui faisant toujours face,
+  pour tester / débugger un algorithme dans des conditions reproductibles. Mouvements :
+  *Immobile*, *Gauche-droite* (distance du trajet), *Carré* (côté), *Cercle* (rayon),
+  plus la vitesse (m/s, le long du trajet) et la distance joueur → centre du motif.
+  Tout se règle en direct dans le menu Échap (lignes « Map » et « Cible »), ou en CLI :
+  `-- --map=range --target=reyna --pattern=circle --size=3 --speed=2 --distance=10`
+  (`--pattern` : `none` | `line` | `square` | `circle`).
+
 ## Assets (Kingdom Archives)
 
 Modèles, textures et animations proviennent de https://kingdomarchives.com/models
@@ -166,7 +178,8 @@ game/
   scripts/player.gd      mouvement, visée (REAL/ASSIST), tir hitscan auto/semi, recul
   scripts/viewmodel.gd   bras FP de l'agent + arme (bone R_WeaponMaster), anims, cadence, muzzle
   scripts/enemy.gd       agent 3e personne animé, hitboxes capsules sur le squelette, PV, respawn
-  scripts/world.gd       monde plat : 29 agents en ligne, 24 armes au sol, lumière, ciel
+  scripts/world.gd       monde plat, maps « vitrine » (29 agents, 24 armes) et « stand de tir »
+  scripts/target_mover.gd déplace la cible du stand de tir (ligne / carré / cercle, face au joueur)
   scripts/ka_assets.gd   lit manifest.json, instancie les GLB, matériaux PBR, retarget d'anims
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
   scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
