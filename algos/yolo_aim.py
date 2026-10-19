@@ -60,7 +60,19 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--no-trt", action="store_true", help="pas de moteur TensorRT, model.predict() seulement")
     ap.add_argument("--debug", action="store_true", help="trace par frame (boîtes, erreur, commande)")
     ap.add_argument("--bench", metavar="DIR", help="mesure hors jeu sur les PNG d'un dossier")
+    ap.add_argument("--export", action="store_true", help="construit le moteur TensorRT (jeu fermé) puis quitte")
     return ap.parse_args(argv)
+
+
+ALGOS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def resolve_model(model: str) -> str:
+    """Un nom nu (`yolo11n.pt`) est rangé dans algos/ (poids téléchargés et moteurs exportés y
+    restent, quel que soit le dossier de lancement) ; un chemin explicite est gardé tel quel."""
+    if os.path.dirname(model) or os.path.exists(model):
+        return model
+    return os.path.join(ALGOS_DIR, model)
 
 
 class Detector:
@@ -82,6 +94,7 @@ class Detector:
         self.imgsz, self.conf = imgsz, conf
         self.last_ms = 0.0
         self.engine = None
+        model = resolve_model(model)
         # entrée réseau pour une frame 16:9 : largeur imgsz, hauteur arrondie au multiple de 32 supérieur
         self.in_w, self.in_h = imgsz, int(math.ceil(imgsz * 9 / 16 / 32) * 32)
         if self.device.startswith("cuda") and (trt or model.endswith(".engine")):
@@ -108,7 +121,8 @@ class Detector:
         if not model.endswith(".engine"):
             engine = f"{os.path.splitext(model)[0]}_{self.in_h}x{self.in_w}.engine"
             if not os.path.exists(engine):
-                print(f"export TensorRT {engine} (une fois, 1–4 min)…", flush=True)
+                print(f"export TensorRT {engine} : une seule fois, 2–4 min GPU libre — bien plus long si le jeu "
+                      f"tourne (préférer `python algos/yolo_aim.py --export` avant de jouer)…", flush=True)
                 out = YOLO(model).export(format="engine", half=True, imgsz=(self.in_h, self.in_w), device=0, verbose=False)
                 os.replace(out, engine)
         self.engine = AutoBackend(engine, device=self.torch.device(self.device), fp16=True, verbose=False)
@@ -197,6 +211,10 @@ def main(argv: List[str]) -> int:
     args = parse_args(argv)
     if args.bench:
         return bench(args)
+    if args.export:
+        det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half, True)
+        print(f"prêt : {det.name}" if det.engine is not None else "pas de moteur TensorRT (CPU ou tensorrt absent)")
+        return 0 if det.engine is not None else 1
 
     det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half, not args.no_trt)
     enabled, autofire, head = False, False, True
