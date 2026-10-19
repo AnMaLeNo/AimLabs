@@ -11,3 +11,6 @@ bridge/.sconsign.dblite
 bridge/.sconf_temp/
 __pycache__/
 *.egg-info/
+
+# raw downloads of tools/fetch_assets.py
+.ka_cache/

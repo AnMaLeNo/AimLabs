@@ -25,7 +25,8 @@ signal mouse_capture_changed(captured: bool)
 @export var max_pitch_deg := 89.0
 
 @export_group("Weapon")
-@export var rounds_per_minute := 650.0
+## Fallback cadence when no Kingdom Archives weapon is loaded (Classic: 6.75 shots/s).
+@export var rounds_per_minute := 405.0
 @export var damage_body := 34
 @export var damage_arm := 20
 @export var damage_head := 100
@@ -35,9 +36,9 @@ signal mouse_capture_changed(captured: bool)
 
 @onready var head: Node3D = $Head
 @onready var camera: Camera3D = $Head/Camera3D
-@onready var weapon: Node3D = $Head/Camera3D/Weapon
-@onready var muzzle: Marker3D = $Head/Camera3D/Weapon/Muzzle
-@onready var muzzle_flash: Node3D = $Head/Camera3D/Weapon/Muzzle/Flash
+@onready var viewmodel: Viewmodel = $Viewmodel
+@onready var viewmodel_camera: Camera3D = $ViewmodelView/SubViewport/ViewmodelCamera
+@onready var muzzle_flash: Node3D = $Viewmodel/Flash
 
 var gravity: float = ProjectSettings.get_setting("physics/3d/default_gravity")
 var yaw_deg := 0.0
@@ -50,9 +51,8 @@ var mouse_captured := false
 var look_delta_this_frame := { LookSource.REAL: Vector2.ZERO, LookSource.ASSIST: Vector2.ZERO }
 var fire_requested_by_assist := false
 
-var _weapon_rest_pos: Vector3
-var _bob_time := 0.0
 var _flash_timer := 0.0
+var _fire_held_last := false
 
 const HITBOX_MASK := (1 << 2) | (1 << 3)  # enemy_body | enemy_head
 const WORLD_MASK := 1 << 0
@@ -60,11 +60,20 @@ const RAY_MASK := HITBOX_MASK | WORLD_MASK
 
 
 func _ready() -> void:
-	_weapon_rest_pos = weapon.position
-	for mi in weapon.find_children("*", "MeshInstance3D", true, false):
-		mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	muzzle_flash.visible = false
 	yaw_deg = rad_to_deg(rotation.y)
+	viewmodel.setup(camera)
+	viewmodel.weapon_changed.connect(func(_slug: String, _name: String) -> void: muzzle_flash.visible = false)
+
+
+## Choose the first-person arms (Kingdom Archives agent slug, e.g. "jett").
+func set_agent(slug: String) -> bool:
+	return viewmodel.set_agent(slug)
+
+
+## Choose the held weapon (Kingdom Archives weapon slug, e.g. "classic").
+func set_weapon(slug: String) -> bool:
+	return viewmodel.set_weapon(slug)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -128,23 +137,32 @@ func _physics_process(delta: float) -> void:
 	velocity.z = horizontal.z
 	move_and_slide()
 
-	_update_weapon_motion(delta, horizontal.length(), sprinting)
+	var target_fov := 82.0 if sprinting else 75.0
+	camera.fov = lerpf(camera.fov, target_fov, clampf(delta * 6.0, 0.0, 1.0))
 
 
 func _process(delta: float) -> void:
 	fire_cooldown = maxf(fire_cooldown - delta, 0.0)
 	_recover_recoil(delta)
 
-	var wants_fire := (mouse_captured and Input.is_action_pressed("fire")) or fire_requested_by_assist
+	# Automatic weapons fire while the button is held, semi-automatic ones once per press
+	# (site AutomaticWeapon flag). Assist requests always count as one press.
+	var fire_held := mouse_captured and Input.is_action_pressed("fire")
+	var human_fire := fire_held if viewmodel.automatic else (fire_held and not _fire_held_last)
+	_fire_held_last = fire_held
+	var wants_fire := human_fire or fire_requested_by_assist
 	fire_requested_by_assist = false
 	if wants_fire and fire_cooldown <= 0.0:
 		_fire()
-		fire_cooldown = 60.0 / rounds_per_minute
+		fire_cooldown = viewmodel.fire_interval() if viewmodel.weapon_slug != "" else 60.0 / rounds_per_minute
 
 	if _flash_timer > 0.0:
 		_flash_timer -= delta
 		if _flash_timer <= 0.0:
 			muzzle_flash.visible = false
+	viewmodel_camera.global_transform = camera.global_transform
+	if muzzle_flash.visible:
+		muzzle_flash.global_position = viewmodel.muzzle_position()
 
 	look_delta_this_frame[LookSource.REAL] = Vector2.ZERO
 	look_delta_this_frame[LookSource.ASSIST] = Vector2.ZERO
@@ -179,15 +197,17 @@ func _fire() -> void:
 		else:
 			_spawn_impact(hit_point, result.normal)
 
-	shot_fired.emit(muzzle.global_position, hit_point, hit_something)
-	_spawn_tracer(muzzle.global_position, hit_point)
+	var muzzle_pos := viewmodel.muzzle_position()
+	shot_fired.emit(muzzle_pos, hit_point, hit_something)
+	_spawn_tracer(muzzle_pos, hit_point)
 
 	recoil_pending_deg += recoil_deg_per_shot
 	pitch_deg = clampf(pitch_deg + recoil_deg_per_shot, -max_pitch_deg, max_pitch_deg)
 	_apply_view_rotation()
-	weapon.position = _weapon_rest_pos + Vector3(0.0, 0.01, 0.06)
+	viewmodel.play("Fire")
 	muzzle_flash.visible = true
-	muzzle_flash.rotation.z = randf() * TAU
+	muzzle_flash.global_position = muzzle_pos
+	muzzle_flash.global_basis = camera.global_basis.rotated(-camera.global_basis.z, randf() * TAU)
 	_flash_timer = 0.04
 
 
@@ -208,19 +228,6 @@ func _recover_recoil(delta: float) -> void:
 	recoil_pending_deg -= step
 	pitch_deg = clampf(pitch_deg - step, -max_pitch_deg, max_pitch_deg)
 	_apply_view_rotation()
-
-
-func _update_weapon_motion(delta: float, speed: float, sprinting: bool) -> void:
-	if is_on_floor() and speed > 0.5:
-		_bob_time += delta * (14.0 if sprinting else 10.0)
-	var bob_amount := clampf(speed / walk_speed, 0.0, 1.5) * 0.008
-	var bob := Vector3(sin(_bob_time) * bob_amount, absf(cos(_bob_time)) * bob_amount, 0.0)
-	var real_look: Vector2 = look_delta_this_frame[LookSource.REAL]
-	var sway := Vector3(-real_look.x, real_look.y, 0.0) * 0.0004
-	var target := _weapon_rest_pos + bob + sway
-	weapon.position = weapon.position.lerp(target, clampf(delta * 12.0, 0.0, 1.0))
-	var target_fov := 82.0 if sprinting else 75.0
-	camera.fov = lerpf(camera.fov, target_fov, clampf(delta * 6.0, 0.0, 1.0))
 
 
 func _spawn_tracer(from: Vector3, to: Vector3) -> void:

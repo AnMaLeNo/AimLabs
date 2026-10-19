@@ -11,6 +11,8 @@ extends Node
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
 ##   --algo=<file.py>      start this algo right away
 ##   --python=<cmd>        interpreter used to run algos (default: python3 / python)
+##   --agent=<slug>        first-person arms (Kingdom Archives agent, default: jett)
+##   --weapon=<slug>       held weapon (Kingdom Archives weapon, default: classic)
 
 ## Game modes = what the external program is allowed to see / do.
 const MODES := {
@@ -30,6 +32,8 @@ const MODES := {
 var bridge: AimBridge
 var runner: AlgoRunner
 var mode_name := "full"
+var agent_slug := ""
+var weapon_slug := ""
 
 var _frames := 0
 var _args := {}
@@ -51,6 +55,8 @@ func _ready() -> void:
 	runner.name = "AlgoRunner"
 	add_child(runner)
 	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
+	set_weapon(String(_args.get("--weapon", "classic")))
+	set_agent(String(_args.get("--agent", "jett")))
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
@@ -77,6 +83,22 @@ func _start_bridge() -> void:
 
 
 ## Switch what the external program may see / do (see MODES); works while playing.
+## Choose the played character (first-person arms). Returns false if the model is missing.
+func set_agent(slug: String) -> bool:
+	if not player.set_agent(slug):
+		return false
+	agent_slug = slug
+	return true
+
+
+## Choose the held weapon (its fire rate and auto / semi-auto mode come from the site data).
+func set_weapon(slug: String) -> bool:
+	if not player.set_weapon(slug):
+		return false
+	weapon_slug = slug
+	return true
+
+
 func set_mode(name: String) -> void:
 	if not MODES.has(name):
 		push_warning("Unknown mode '%s', using 'full'" % name)
@@ -88,6 +110,11 @@ func set_mode(name: String) -> void:
 
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and player.mouse_captured:
+		if event.keycode == KEY_R:
+			player.viewmodel.play("Reload")
+		elif event.keycode == KEY_F:
+			player.viewmodel.play("Inspect")
 	if event.is_action_pressed("respawn_targets"):
 		world.respawn_all()
 

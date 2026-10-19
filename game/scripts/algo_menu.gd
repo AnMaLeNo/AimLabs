@@ -14,6 +14,8 @@ var _dir_label: Label
 var _start_btn: Button
 var _stop_btn: Button
 var _mode_btn: OptionButton
+var _agent_btn: OptionButton
+var _weapon_btn: OptionButton
 var _bridge_label: Label
 var _log_dirty := true
 
@@ -113,6 +115,36 @@ func _build() -> void:
 
 	var bottom := HBoxContainer.new()
 	root.add_child(bottom)
+	var agent_label := Label.new()
+	agent_label.text = "Personnage :"
+	bottom.add_child(agent_label)
+	_agent_btn = OptionButton.new()
+	var agents := KAAssets.agents()
+	for slug in KAAssets.agent_slugs():
+		_agent_btn.add_item(String(agents[slug]["name"]))
+		_agent_btn.set_item_metadata(_agent_btn.item_count - 1, slug)
+		if slug == game.agent_slug:
+			_agent_btn.select(_agent_btn.item_count - 1)
+	_agent_btn.item_selected.connect(func(i: int) -> void: game.set_agent(String(_agent_btn.get_item_metadata(i))))
+	bottom.add_child(_agent_btn)
+	var weapon_label := Label.new()
+	weapon_label.text = "Arme :"
+	bottom.add_child(weapon_label)
+	_weapon_btn = OptionButton.new()
+	var weapons := KAAssets.weapons()
+	var wslugs: Array = weapons.keys()
+	wslugs.sort_custom(func(x: String, y: String) -> bool: return String(weapons[x]["name"]) < String(weapons[y]["name"]))
+	for slug: String in wslugs:
+		if not weapons[slug].has("fp"):
+			continue
+		var w: Dictionary = weapons[slug]
+		var st: Dictionary = w["fp"].get("settings", {})
+		_weapon_btn.add_item("%s (%s, %.2f/s)" % [w["name"], "auto" if bool(st.get("AutomaticWeapon", false)) else "semi", float(st.get("FireRate", 0.0))])
+		_weapon_btn.set_item_metadata(_weapon_btn.item_count - 1, slug)
+		if slug == game.weapon_slug:
+			_weapon_btn.select(_weapon_btn.item_count - 1)
+	_weapon_btn.item_selected.connect(func(i: int) -> void: game.set_weapon(String(_weapon_btn.get_item_metadata(i))))
+	bottom.add_child(_weapon_btn)
 	var mode_label := Label.new()
 	mode_label.text = "Mode :"
 	bottom.add_child(mode_label)
