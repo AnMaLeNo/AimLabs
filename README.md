@@ -38,6 +38,11 @@ godot --path game
 
 Sans GPU (VM, CI) : `godot --path game --rendering-method gl_compatibility`.
 
+Sur macOS (Apple Silicon ou Intel) : `brew install --cask godot` installe Godot.app et la
+commande `godot` ; le jeu tourne en Forward+ sur Metal. Le Python fourni par Apple
+(`/usr/bin/python3`) n'a pas numpy : lancer les algos avec un Python qui a les dépendances
+(`-- --python=/chemin/vers/venv/bin/python`).
+
 Commandes : WASD déplacer · Shift sprint · Espace saut · clic gauche tirer (maintenu
 pour les armes automatiques) · R recharger · F inspecter · T réinitialiser les cibles ·
 Échap menu (personnage, arme, algos ; libère la souris) / clic hors du menu pour reprendre.
@@ -93,7 +98,8 @@ with AimClient() as c:                 # s'attache à la mémoire partagée "aim
 * **Capture** : sur Vulkan/D3D12 (Forward+/Mobile), lecture GPU→CPU asynchrone
   (`RenderingDevice.texture_get_data_async`, ne bloque pas le rendu) ; en Compatibility
   (OpenGL), lecture synchrone. La copie en mémoire partagée se fait dans un thread dédié.
-* **Mémoire partagée** : `/dev/shm/aimlabs` (Linux) ou mapping nommé `aimlabs` (Windows).
+* **Mémoire partagée** : `/dev/shm/aimlabs` (Linux), segment POSIX `/aimlabs` (macOS) ou
+  mapping nommé `aimlabs` (Windows).
   Layout dans `bridge/src/protocol.h` (miroir `sdk/python/aimlabs/protocol.py`) :
   en-tête, bloc état (seqlock), anneau de commandes (client → jeu), 3 slots de frame (seqlock).
   N'importe quel langage capable de mmap peut s'y brancher.
@@ -150,8 +156,8 @@ pendant que le menu est ouvert (pratique pour lire son log en direct). Options :
 
 ### Compiler le pont
 
-Binaries Linux et Windows x86_64 (release) sont commités dans `game/bin/` et rebuildés par
-la CI (`.github/workflows/bridge.yml`). Pour recompiler :
+Les binaires release (Linux et Windows x86_64, macOS universel arm64 + x86_64) sont commités
+dans `game/bin/` et rebuildés par la CI (`.github/workflows/bridge.yml`). Pour recompiler :
 
 ```sh
 git submodule update --init          # bridge/godot-cpp
@@ -159,6 +165,7 @@ pip install scons
 cd bridge
 scons platform=linux target=template_release api_version=4.7 -j8
 scons platform=windows arch=x86_64 target=template_release api_version=4.7 use_mingw=yes -j8  # cross-compile
+scons platform=macos arch=universal target=template_release api_version=4.7 -j8  # sur un Mac (Xcode CLT)
 ```
 
 ## Vérifications automatiques
@@ -201,7 +208,7 @@ game/
   scripts/algo_menu.gd   menu Échap : liste, Lancer/Arrêter, log, mode
   assets/ka/             Kingdom Archives : agents/, agents_fp/, weapons/, manifest.json
   assets/weapons/vandal/   ancien viewmodel « VALORANT Weapon Vandal Rifle » par 零宽不连字 / LkblZ (Sketchfab Standard, voir license.txt), plus utilisé
-  bin/                   aimbridge.gdextension + binaires Linux/Windows
+  bin/                   aimbridge.gdextension + binaires Linux/Windows/macOS
 bridge/
   src/protocol.h         layout de la mémoire partagée (version 2 : + clavier/souris)
   src/aim_bridge.*       nœud AimBridge : capture, thread de publication, commandes, état
