@@ -214,6 +214,16 @@ pendant que le menu est ouvert (pratique pour lire son log en direct). Options :
   avancée de sa vitesse écran × latence capture→tir (`--no-lead`), `--margin 0.6` pour ne viser
   que le torse. `CAPSLOCK` on/off, `ALT` maintenu. Algo de référence du benchmark ci-dessus.
 
+### SDK Rust (`sdk/rust/aimlabs`)
+
+Même protocole v2, **zéro copie** : `Bridge::attach("aimlabs", timeout)`, `wait_frame()` rend une
+`FrameView` qui *emprunte* les pixels dans le segment partagé (seqlock vérifié par `still_valid()`),
+`crop_into()` ne copie que la région demandée (le carré autour du réticule : 0,2 ms pour 240 px, au
+lieu de 3,7 Mo de frame), `state()`, `Bridge::key_pressed(&st, SLOT_CAPSLOCK)`, `move_by` / `fire` /
+`mark`. `cargo run --release --bin aimlabs-selftest -- --seconds 5 --fire` mesure le coût par frame
+et la latence capture → commande rapportée par le jeu (Linux `/dev/shm/aimlabs`, Windows mapping
+`aimlabs`, toolchain `stable-x86_64-pc-windows-gnu` suffit).
+
 ### Compiler le pont
 
 Les binaires release (Linux et Windows x86_64, macOS universel arm64 + x86_64) sont commités
