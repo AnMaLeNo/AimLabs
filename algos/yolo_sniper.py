@@ -67,34 +67,52 @@ def crop_square(img: np.ndarray, frac: float) -> Tuple[np.ndarray, int, int]:
 
 
 class Track:
-    """Position de la cible (centre de boîte) sur les dernières frames → vitesse en px/s."""
+    """Boîte de la cible sur les dernières frames → vitesse en px/s.
 
-    def __init__(self, horizon_s: float = 0.12) -> None:
-        self.hist: List[Tuple[float, float, float, float, float]] = []  # (t, cx, cy, w, h)
+    La vitesse est mesurée sur les **bords** de la boîte, pas sur son centre : quand la cible entre
+    dans le carré analysé, le bord côté bordure est tronqué et le centre avance à la moitié de la
+    vitesse réelle (c'est ce qui faisait rater les tirs rapides). Un bord collé à la bordure du
+    crop (< 2 px) est ignoré ; il faut ≥ 2 mesures d'un même bord libre.
+    """
+
+    def __init__(self, side: int, horizon_s: float = 0.12) -> None:
+        self.hist: List[Tuple[float, float, float, float, float]] = []  # (t, x1, x2, y1, y2)
         self.horizon = horizon_s
+        self.side = side
 
     def push(self, t: float, box) -> None:
         x1, y1, x2, y2 = box[:4]
-        self.hist.append((t, (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1))
+        self.hist.append((t, x1, x2, y1, y2))
         self.hist = [p for p in self.hist if t - p[0] <= self.horizon]
 
     def reset(self) -> None:
         self.hist = []
 
-    def velocity(self) -> Optional[Tuple[float, float, float]]:
-        """(vx, vy, résidu px) par régression linéaire ; None si < 2 points."""
-        if len(self.hist) < 2:
+    def _fit(self, pts: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
+        if len(pts) < 2:
             return None
-        t = np.array([p[0] for p in self.hist])
-        t = t - t[-1]
-        cx = np.array([p[1] for p in self.hist])
-        cy = np.array([p[2] for p in self.hist])
+        t = np.array([p[0] for p in pts])
+        v = np.array([p[1] for p in pts])
         if float(np.ptp(t)) < 1e-4:
             return None
-        ax, bx = np.polyfit(t, cx, 1)
-        ay, by = np.polyfit(t, cy, 1)
-        res = float(np.sqrt(np.mean((ax * t + bx - cx) ** 2 + (ay * t + by - cy) ** 2)))
-        return float(ax), float(ay), res
+        a, b = np.polyfit(t - t[-1], v, 1)
+        res = float(np.sqrt(np.mean((a * (t - t[-1]) + b - v) ** 2)))
+        return float(a), res
+
+    def velocity(self) -> Optional[Tuple[float, float, float]]:
+        """(vx, vy, résidu px) ; None si aucun bord libre n'a ≥ 2 mesures."""
+        m = 2.0
+        left = [(p[0], p[1]) for p in self.hist if p[1] > m]
+        right = [(p[0], p[2]) for p in self.hist if p[2] < self.side - m]
+        top = [(p[0], p[3]) for p in self.hist if p[3] > m]
+        bottom = [(p[0], p[4]) for p in self.hist if p[4] < self.side - m]
+        fx = [f for f in (self._fit(left), self._fit(right)) if f is not None]
+        fy = [f for f in (self._fit(top), self._fit(bottom)) if f is not None]
+        if not fx:
+            return None
+        vx, rx = min(fx, key=lambda f: f[1])  # le bord le mieux ajusté
+        vy, ry = min(fy, key=lambda f: f[1]) if fy else (0.0, 0.0)
+        return vx, vy, max(rx, ry)
 
 
 def main(argv) -> int:
@@ -107,7 +125,7 @@ def main(argv) -> int:
         return 0
     seg = det if args.mode == "seg" else None
     enabled = os.environ.get("AIMLABS_AUTOSTART") == "1"
-    track = Track()
+    track = None
     last_fire_t = -1e9
     locked = False  # après un tir : attendre que la cible quitte le réticule
     n_frames, n_fire, n_pre, ms_acc, t_stats = 0, 0, 0, 0.0, time.monotonic()
@@ -134,10 +152,13 @@ def main(argv) -> int:
                           f"tirs {n_fire} (dont anticipés {n_pre})", flush=True)
                 n_frames, n_fire, n_pre, ms_acc, t_stats = 0, 0, 0, 0.0, now
             if not active:
-                track.reset()
+                if track is not None:
+                    track.reset()
                 continue
 
             crop, x0, y0 = crop_square(f.image, args.crop)
+            if track is None:
+                track = Track(crop.shape[0])
             boxes = det.boxes(crop)  # coordonnées du crop ; le réticule est en son centre
             n_frames += 1
             ms_acc += det.last_ms
@@ -169,7 +190,7 @@ def main(argv) -> int:
             if vel is not None and args.lead_scale > 0.0:
                 vx, vy, res = vel
                 bw = b[2] - b[0]
-                if res < 0.25 * bw:  # mouvement cohérent (sinon : pas d'anticipation)
+                if res < 0.15 * bw + 2.0:  # mouvement cohérent (sinon : pas d'anticipation)
                     dx, dy = vx * latency * args.lead_scale, vy * latency * args.lead_scale
             px1, py1, px2, py2 = b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy
             mx, my = (px1 + px2) / 2, (py1 + py2) / 2
@@ -194,6 +215,7 @@ def main(argv) -> int:
                     locked = True
                     if args.debug:
                         print(f"[tir] frame {f.id} {'anticipé ' if not under_now else ''}conf {b[4]:.2f} avance ({dx:+.0f},{dy:+.0f}) px "
+                              f"v {vel[0] if vel else 0:+.0f} px/s res {vel[2] if vel else 0:.1f} boîte x[{b[0]:.0f},{b[2]:.0f}] "
                               f"latence {latency * 1000:.0f} ms inf {det.last_ms:.1f} ms", flush=True)
     return 0
 
