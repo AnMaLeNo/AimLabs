@@ -41,5 +41,13 @@ le segment partagé en cours). La première ligne de la docstring sert de descri
   ≥ `--conf 0.5`, pixel du réticule dans le masque de segmentation (`--mode seg`, défaut) ; une balle
   puis silence `--cooldown 1` s et tant que la cible reste sous le réticule. Benchmark dédié :
   `godot --path game -- --map=range --bench-sniper --algo=yolo_sniper.py` (règle : touché avec ≤ 1 balle).
+  Mesuré sur RTX 3080 (Operator, poitrine/bassin/tête, 5 et 10 m, 64 traversées) : 39 touchés, 10 ratés,
+  15 sans tir (refus = sûreté), 0 balle en trop ; ≤ 8 m/s : 20/23 (les 3 ratés = trou de hitbox au bassin
+  à 10 m, corrigé depuis) ; les ratés restants sont à ≥ 16 m/s, balle 0,1–0,4 m en retard. `yolo_trigger.py`
+  sous les mêmes règles : 24 touchés, 14 ratés, 7 sans tir, 3 balles en trop (48 traversées). Deux
+  leçons : (1) le crop **n'accélère pas** l'inférence (9–10 ms/frame contre 5–6 ms plein cadre 384×640 :
+  le coût est le lancement GPU + les sorties seg, pas les pixels) — son intérêt est la pleine
+  résolution ; (2) la vitesse doit être mesurée sur les **bords libres** de la boîte, pas son centre :
+  tronquée par le crop à l'entrée, la boîte avance à mi-vitesse et le tir part en retard.
 
 Pour pointer le jeu sur un autre dossier : `--algos=/chemin` (ou le bouton « Dossier » du menu).
