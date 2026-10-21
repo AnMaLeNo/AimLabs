@@ -101,11 +101,19 @@ godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --bench-
 godot --path game -- --map=range --bench-trigger --bench-oracle --bridge=off         # oracle : marque à chaque tick (plafond = speed-max)
 godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py "--algo-args=--mode seg"   # options passées à l'algo
 godot --path game -- --map=range --show-hitboxes                                     # dessine les capsules (vérifier hitbox ↔ modèle)
+godot --path game -- --map=range --bench-sniper --algo=yolo_sniper.py                # règles « une balle » (voir ci-dessous)
 ```
+
+**Mode sniper** (`--bench-sniper`, arme `operator` par défaut) : mêmes traversées, mais une traversée ne
+réussit que si la cible est **touchée avec au plus une balle** (`--bench-max-shots`). Chaque tir est
+enregistré (instant, touché/zone, position de la cible) et classé `hit` / `miss` / `no_shot` /
+`extra_shots`, avec le délai entre l'entrée de la cible sous le réticule et le tir ; la fiche montre
+chaque balle par un triangle (cyan touchée, magenta ratée) à la position de la cible au moment du tir.
+Le bench attend le réarmement de l'arme entre deux traversées.
 
 Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
 `--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
-`--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-mark-tolerance`, `--bench-settle`,
+`--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-max-shots`, `--bench-mark-tolerance`, `--bench-settle`,
 `--bench-pause`, `--bench-out=<json>`. Menu Échap (map Stand de tir) : bouton **Benchmark tir
 auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
 `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).
