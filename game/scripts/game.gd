@@ -21,7 +21,8 @@ extends Node
 ##   --distance=<m>        range: distance spawn -> pattern centre (default: 10)
 ##   --algo-args="…"       extra command-line arguments for --algo (e.g. "--mode seg")
 ##   --show-hitboxes       draw collision shapes (check hitboxes against the visual model)
-##   --bench-trigger       range: run the trigger benchmark (TriggerBench) then quit; with
+##   --bench-trigger       range: run the trigger benchmark
+##   --bench-sniper        same, « one bullet » rules: a sweep succeeds only if hit with ≤ 1 shot (weapon operator by default) (TriggerBench) then quit; with
 ##                         --algo the algo is started first and the bench waits for it.
 ##   --bench-<key>=<v>     TriggerBench.DEFAULTS keys: distance-start/-step/-max, speed-start/
 ##                         -min/-max, precision, confirm, width, travel-widths, heights
@@ -74,7 +75,7 @@ func _ready() -> void:
 	runner.name = "AlgoRunner"
 	add_child(runner)
 	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
-	set_weapon(String(_args.get("--weapon", "classic")))
+	set_weapon(String(_args.get("--weapon", "operator" if _args.has("--bench-sniper") else "classic")))
 	set_agent(String(_args.get("--agent", "jett")))
 	if _args.has("--pattern"):
 		world.set_pattern(String(_args["--pattern"]))
@@ -96,6 +97,9 @@ func _ready() -> void:
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
+	if _args.has("--bench-sniper"):
+		_args["--bench-trigger"] = true
+		_args["--bench-sniper"] = true
 	if _args.has("--bench-trigger"):
 		OS.set_environment("AIMLABS_AUTOSTART", "1")  # algos start armed (no CapsLock needed)
 	if _args.has("--algo"):
@@ -121,6 +125,8 @@ func _start_bench_from_args() -> void:
 			var v: Variant = _args[flag]
 			cfg[key] = v if typeof(v) == TYPE_BOOL or typeof(TriggerBench.DEFAULTS[key]) == TYPE_STRING else float(v)
 	cfg["wait_client"] = _args.has("--algo")
+	if _args.has("--bench-sniper"):
+		cfg["sniper"] = true
 	var algo_name := String(_args.get("--algo", "oracle" if cfg.get("oracle", false) else "human")).get_basename()
 	bench.out_path = String(_args.get("--bench-out", AlgoRunner._repo_root().path_join(
 		"bench_results/trigger_%s_%s.json" % [algo_name, Time.get_datetime_string_from_system().replace(":", "-")])))

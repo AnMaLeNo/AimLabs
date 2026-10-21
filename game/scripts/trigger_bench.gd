@@ -25,6 +25,7 @@ const DEFAULTS := {
 	"speed_start": 2.0, "speed_min": 0.25, "speed_max": 150.0, "precision": 0.1, "confirm": 2,
 	"width": 1.2, "travel_widths": 2.0, "heights": "chest", "criterion": "auto",
 	"mark_tolerance": 0.03, "settle": 3.0, "pause": 0.3, "wait_client": false, "oracle": false,
+	"sniper": false, "max_shots": 1,  # sniper: one bullet per sweep — success = ≥ 1 hit with ≤ max_shots shots
 	"truth": "auto",  # visual (silhouette under the reticle, what a vision algo sees) | hitbox | auto = visual when the probe works
 }
 ## Aim heights as fraction of the head height (chest/head use the hitboxes directly).
@@ -65,6 +66,8 @@ var _probe_vp: SubViewport
 var _probe_cam: Camera3D
 var _probe_ok := false
 var _truth := "hitbox"
+var _pending_hit := ""      # zone hit by the shot being resolved (target_hit fires before shot_fired)
+var _oracle_fired := false
 var _marks: Array = []     # per sweep: [recv_usec, capture_usec, frame_id]
 var _criterion := "hit"
 var _saved_respawn_delay := 3.0
@@ -114,7 +117,9 @@ func start(cfg: Dictionary = {}) -> bool:
 		_heights.append("chest")
 	var client: bool = game.bridge != null and game.bridge.get_stats()["client_connected"]
 	_criterion = String(config["criterion"])
-	if _criterion == "auto":
+	if bool(config["sniper"]):
+		_criterion = "hit"
+	elif _criterion == "auto":
 		_criterion = "mark" if (client or bool(config["oracle"]) or bool(config["wait_client"])) else "hit"
 	result = {
 		"algo": game.runner.current_name() if game.runner and game.runner.is_running() else ("oracle" if config["oracle"] else "human"),
@@ -192,7 +197,9 @@ func _begin_pass() -> void:
 		_target.respawn()
 	_height_entry["aim_y"] = _aim_y()
 	_pass_stats = { "speed": _speed, "dir": _dir, "hits": 0, "shots": 0, "headshots": 0, "killed": false,
-		"confirm": _confirm_left > 0 }
+		"confirm": _confirm_left > 0, "shot_rows": [] }
+	_pending_hit = ""
+	_oracle_fired = false
 	_ticks = []
 	_vis_samples = []
 	_marks = []
@@ -451,16 +458,38 @@ func _nearest_tick(usec: int) -> int:
 func _sweep_scored() -> bool:
 	if _criterion == "mark":
 		return int(_pass_stats["marks_correct"]) > 0
+	if bool(config["sniper"]):
+		return int(_pass_stats["hits"]) > 0 and int(_pass_stats["shots"]) <= int(config["max_shots"])
 	return int(_pass_stats["hits"]) > 0
+
+
+func _sweep_ok(sw: Dictionary) -> bool:
+	if _criterion == "mark":
+		return int(sw["marks_correct"]) > 0
+	if bool(config["sniper"]):
+		return int(sw["hits"]) > 0 and int(sw["shots"]) <= int(config["max_shots"])
+	return int(sw["hits"]) > 0
 
 
 func _end_pass() -> void:
 	_analyse_sweep()
+	if bool(config["sniper"]):
+		var shots: int = _pass_stats["shots"]
+		var hits: int = _pass_stats["hits"]
+		_pass_stats["outcome"] = "no_shot" if shots == 0 else ("extra_shots" if shots > int(config["max_shots"]) else ("hit" if hits > 0 else "miss"))
+		var first_under := -1
+		for e in _events():
+			if e[1]:
+				first_under = int(e[0])
+				break
+		var rows: Array = _pass_stats["shot_rows"]
+		_pass_stats["first_shot_delay_ms"] = (int(rows[0]["usec"]) - first_under) / 1000.0 if rows.size() > 0 and first_under >= 0 else null
 	_dist_entry["sweeps"].append(_pass_stats)
 	var hit := _sweep_scored()
-	print("bench: [%s] %.0f m  %.2f m/s  %s  marques %d (%d justes, %d fausses)  couverture %.0f %%  tirs %d  touches %d%s" % [
+	print("bench: [%s] %.0f m  %.2f m/s  %s  marques %d (%d justes, %d fausses)  couverture %.0f %%  tirs %d  touches %d%s%s" % [
 		_heights[_height_index], _distance, _speed, "OK" if hit else "raté", _pass_stats["marks"], _pass_stats["marks_correct"],
 		_pass_stats["false_positives"], 100.0 * float(_pass_stats["coverage"]), _pass_stats["shots"], _pass_stats["hits"],
+		("  sniper: " + String(_pass_stats["outcome"])) if bool(config["sniper"]) else "",
 		"  (confirmation)" if _confirm_left > 0 else ""])
 	_dir = -_dir
 	if _confirm_left > 0:
@@ -474,7 +503,7 @@ func _end_pass() -> void:
 			_hi = _lo
 			_lo = 0.0
 			for sw in _dist_entry["sweeps"]:
-				var ok_sw: bool = (int(sw["marks_correct"]) > 0) if _criterion == "mark" else (int(sw["hits"]) > 0)
+				var ok_sw: bool = _sweep_ok(sw)
 				if ok_sw and float(sw["speed"]) < _hi and float(sw["speed"]) > _lo:
 					_lo = float(sw["speed"])
 			_speed = (_lo + _hi) * 0.5 if _lo > 0.0 else _hi * 0.5
@@ -518,7 +547,22 @@ func _next_sweep() -> void:
 	_timer = float(config["pause"])
 
 
+func _sniper_summary(dist_entry: Dictionary) -> Dictionary:
+	var out := { "hit": 0, "miss": 0, "no_shot": 0, "extra_shots": 0 }
+	var delays := []
+	for sw in dist_entry["sweeps"]:
+		if sw.has("outcome"):
+			out[sw["outcome"]] += 1
+		if sw.get("first_shot_delay_ms") != null:
+			delays.append(float(sw["first_shot_delay_ms"]))
+	delays.sort()
+	out["first_shot_delay_ms_median"] = delays[delays.size() / 2] if delays.size() > 0 else null
+	return out
+
+
 func _end_distance() -> void:
+	if bool(config["sniper"]):
+		_dist_entry["sniper"] = _sniper_summary(_dist_entry)
 	_dist_entry["max_speed_hit"] = _lo
 	_height_entry["distances"].append(_dist_entry)
 	print("bench: [%s] distance %.0f m → vitesse limite %.2f m/s (%d traversées)" % [_heights[_height_index], _distance, _lo, _dist_entry["sweeps"].size()])
@@ -588,7 +632,7 @@ func build_svg() -> String:
 	for h in result["heights"]:
 		rows.append(["title", "Hauteur de visée : %s (réticule à y = %.2f m du sol)" % [h["height"], h["aim_y"]]])
 		for d in h["distances"]:
-			rows.append(["dist", "Distance %.0f m — vitesse limite trouvée : %.2f m/s" % [d["distance"], d["max_speed_hit"]], d])
+			rows.append(["dist", "Distance %.0f m — vitesse limite trouvée : %.2f m/s%s" % [d["distance"], d["max_speed_hit"], _sniper_dist_label(d)], d])
 			var sweeps: Array = d["sweeps"].duplicate()
 			sweeps.sort_custom(func(a, b): return float(a["speed"]) < float(b["speed"]))
 			for sw in sweeps:
@@ -610,7 +654,8 @@ func build_svg() -> String:
 			["#fa0", "orange : marque envoyée alors que la cible n\'était pas sous le réticule (fausse marque)"],
 			["#333", "gris : cible hors du réticule, rien à détecter"],
 			["#4af", "bleu (filet au-dessus de la barre) : silhouette visible de la cible sous le réticule (vérité visuelle = ce qu'un algo de vision peut voir)"],
-			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"]]:
+			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"],
+			["#0ff", "triangle cyan : balle tirée qui a touché (position de la cible à l'instant du tir) ; magenta : balle ratée"]]:
 		out.append('<rect x="14" y="%.0f" width="22" height="10" fill="%s"/>' % [ly - 9.0, item[0]])
 		out.append('<text x="42" y="%.0f" fill="#ccc">%s</text>' % [ly, item[1]])
 		ly += 14.0
@@ -639,13 +684,14 @@ func build_svg() -> String:
 			continue
 		var sw: Dictionary = r[1]
 		var d: Dictionary = r[2]
-		var ok: bool = (int(sw["marks_correct"]) > 0) if _criterion == "mark" else (int(sw["hits"]) > 0)
+		var ok: bool = _sweep_ok(sw)
 		var lat = sw.get("first_mark_latency_ms")
 		var arrow := "→ gauche→droite" if float(sw.get("dir", 1.0)) > 0.0 else "← droite→gauche"
-		var label := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s" % [
+		var label := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s%s" % [
 			float(d["distance"]), float(sw["speed"]), arrow, "OK" if ok else "raté",
 			" (confirmation)" if sw.get("confirm", false) else "", int(sw["marks_correct"]), int(sw["marks"]),
-			100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else ""]
+			100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else "",
+			_shot_label(sw)]
 		out.append('<text x="40" y="%.0f" fill="%s">%s</text>' % [y + 11.0, "#9f9" if ok else "#f99", _esc(label)])
 		out.append('<rect x="%.0f" y="%.0f" width="%.0f" height="%.0f" fill="#333"/>' % [x0, y + 2.0, bar_w, row_h - 4.0])
 		for seg in sw.get("missed_segments", []):
@@ -667,6 +713,9 @@ func build_svg() -> String:
 			var a: float = px.call(float(seg[0]))
 			var b: float = px.call(float(seg[1]))
 			out.append('<rect x="%.1f" y="%.0f" width="%.1f" height="2" fill="#c6f"/>' % [minf(a, b), y + row_h - 2.0, maxf(absf(b - a), 1.0)])
+		for sh in sw.get("shot_rows", []):
+			var a: float = x0 + (clampf(float(sh["path_x"]), -half, half) + half) / (2.0 * half) * bar_w
+			out.append('<polygon points="%.1f,%.0f %.1f,%.0f %.1f,%.0f" fill="%s"/>' % [a, y + 2.0, a - 5.0, y + row_h - 2.0, a + 5.0, y + row_h - 2.0, "#0ff" if sh["hit"] else "#f0f"])
 		out.append('<line x1="%.0f" y1="%.0f" x2="%.0f" y2="%.0f" stroke="#fff" stroke-width="1"/>' % [x0 + bar_w * 0.5, y, x0 + bar_w * 0.5, y + row_h])
 		var ax0 := x0 + bar_w + 6.0
 		out.append('<text x="%.0f" y="%.0f" fill="#ccc" font-size="12">%s</text>' % [ax0, y + 12.0, "→" if float(sw.get("dir", 1.0)) > 0.0 else "←"])
@@ -674,6 +723,23 @@ func build_svg() -> String:
 	out.append('</svg>')
 	out[0] = '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" font-family="sans-serif" font-size="11">' % [int(total_w), int(y + 20.0)]
 	return "\n".join(out)
+
+
+func _sniper_dist_label(d: Dictionary) -> String:
+	if not d.has("sniper"):
+		return ""
+	var sn: Dictionary = d["sniper"]
+	var med = sn.get("first_shot_delay_ms_median")
+	return " — sniper : %d touchés, %d ratés, %d sans tir, %d trop de balles%s" % [int(sn["hit"]), int(sn["miss"]), int(sn["no_shot"]), int(sn["extra_shots"]),
+		(" · délai médian %.0f ms" % float(med)) if med != null else ""]
+
+
+func _shot_label(sw: Dictionary) -> String:
+	if not sw.has("outcome"):
+		return ""
+	var d = sw.get("first_shot_delay_ms")
+	var names := { "hit": "TOUCHÉ", "miss": "RATÉ", "no_shot": "pas tiré", "extra_shots": "trop de balles (%d)" % int(sw["shots"]) }
+	return " · sniper : %s%s" % [names[sw["outcome"]], (" à %.0f ms" % float(d)) if d != null else ""]
 
 
 static func _esc(t: String) -> String:
@@ -708,6 +774,10 @@ class SheetBar extends Control:
 			var a: float = px.call(float(seg[0]))
 			var b: float = px.call(float(seg[1]))
 			draw_rect(Rect2(minf(a, b), h - 2, maxf(absf(b - a), 1.0), 2), Color("#c6f"))
+		for sh in sweep.get("shot_rows", []):
+			var a: float = (clampf(float(sh["path_x"]), -half, half) + half) / (2.0 * half) * w
+			var col := Color("#0ff") if sh["hit"] else Color("#f0f")
+			draw_colored_polygon(PackedVector2Array([Vector2(a, 2), Vector2(a - 5, h - 2), Vector2(a + 5, h - 2)]), col)
 		draw_line(Vector2(w * 0.5, 0), Vector2(w * 0.5, h), Color.WHITE, 1.0)
 
 
@@ -750,7 +820,8 @@ func show_sheet(visible_sheet: bool = true) -> void:
 	for item in [["#3c3", "vert : cible sous le réticule et marquée par l'algo (détectée)"], ["#d33", "rouge : cible sous le réticule mais aucune marque (ratée)"],
 			["#fa0", "orange : marque envoyée alors que la cible n'était pas sous le réticule (fausse marque)"], ["#333", "gris : cible hors du réticule"],
 			["#4af", "bleu (filet au-dessus de la barre) : silhouette visible de la cible sous le réticule (vérité visuelle = ce qu'un algo de vision peut voir)"],
-			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"]]:
+			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"],
+			["#0ff", "triangle cyan : balle tirée qui a touché (position de la cible à l'instant du tir) ; triangle magenta : balle ratée"]]:
 		var row := HBoxContainer.new()
 		var sw := ColorRect.new()
 		sw.color = Color(item[0])
@@ -765,18 +836,19 @@ func show_sheet(visible_sheet: bool = true) -> void:
 	for h in result["heights"]:
 		root.add_child(_label("Hauteur de visée : %s (réticule à y = %.2f m du sol)" % [h["height"], h["aim_y"]], Color.WHITE, 14, true))
 		for d in h["distances"]:
-			root.add_child(_label("   Distance %.0f m — vitesse limite trouvée : %.2f m/s" % [d["distance"], d["max_speed_hit"]], Color("#eee"), 13, true))
+			root.add_child(_label("   Distance %.0f m — vitesse limite trouvée : %.2f m/s%s" % [d["distance"], d["max_speed_hit"], _sniper_dist_label(d)], Color("#eee"), 13, true))
 			var sweeps: Array = d["sweeps"].duplicate()
 			sweeps.sort_custom(func(a, b): return float(a["speed"]) < float(b["speed"]))
 			for sw in sweeps:
-				var ok: bool = (int(sw["marks_correct"]) > 0) if _criterion == "mark" else (int(sw["hits"]) > 0)
+				var ok: bool = _sweep_ok(sw)
 				var lat = sw.get("first_mark_latency_ms")
 				var arrow := "→ gauche→droite" if float(sw.get("dir", 1.0)) > 0.0 else "← droite→gauche"
 				var row := HBoxContainer.new()
 				row.add_theme_constant_override("separation", 10)
-				var text := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s" % [
+				var text := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s%s" % [
 					float(d["distance"]), float(sw["speed"]), arrow, "OK" if ok else "raté", " (conf.)" if sw.get("confirm", false) else "",
-					int(sw["marks_correct"]), int(sw["marks"]), 100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else ""]
+					int(sw["marks_correct"]), int(sw["marks"]), 100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else "",
+					_shot_label(sw)]
 				var l := _label(text, Color("#9f9") if ok else Color("#f99"), 12)
 				l.custom_minimum_size.x = 620
 				row.add_child(l)
@@ -844,15 +916,22 @@ func _physics_process(delta: float) -> void:
 			_target.position = Vector3(-_half_travel * _dir, 0.0, -_distance)
 			_face_player()
 			_timer -= delta
-			if _timer <= 0.0:
+			# sniper: the weapon must be ready again (Operator: 1.67 s between shots) before the next sweep
+			if _timer <= 0.0 and not (bool(config["sniper"]) and _player.fire_cooldown > 0.0):
 				_begin_pass()
 		"cross":
 			var now := Time.get_ticks_usec()
 			var gt := _ground_truth()
 			_ticks.append([now, gt[0], gt[1], gt[2], gt[3], _x])
 			if bool(config["oracle"]):
-				_player.request_fire_from_assist()
-				if (_visible_at(now) if _truth == "visual" else gt[0]):
+				var under_now: bool = _visible_at(now) if _truth == "visual" else gt[0]
+				if bool(config["sniper"]):
+					if under_now and not _oracle_fired:
+						_player.request_fire_from_assist()
+						_oracle_fired = true
+				else:
+					_player.request_fire_from_assist()
+				if under_now:
 					_marks.append([now, now, 0])
 			if absf(_x) > _half_travel:
 				_end_pass()
@@ -866,6 +945,7 @@ func _on_mark(frame_id: int, capture_usec: int, _point_px: Vector2) -> void:
 func _on_target_hit(enemy: Node, zone: String, _damage: int, killed: bool) -> void:
 	if running and _phase == "cross" and enemy == _target:
 		_pass_stats["hits"] += 1
+		_pending_hit = zone
 		if zone == "head":
 			_pass_stats["headshots"] += 1
 		if killed:
@@ -875,3 +955,8 @@ func _on_target_hit(enemy: Node, zone: String, _damage: int, killed: bool) -> vo
 func _on_shot_fired(_origin: Vector3, _hit: Vector3, _hit_something: bool) -> void:
 	if running and _phase == "cross":
 		_pass_stats["shots"] += 1
+		var now := Time.get_ticks_usec()
+		var gt := _ground_truth()
+		_pass_stats["shot_rows"].append({ "usec": now, "hit": _pending_hit != "", "zone": _pending_hit,
+			"path_x": _x, "local_x": gt[2] if gt[0] else -_x, "visible": _visible_at(now) })
+		_pending_hit = ""
