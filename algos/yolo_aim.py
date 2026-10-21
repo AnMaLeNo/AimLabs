@@ -81,7 +81,7 @@ class Detector:
     sur RTX 3080 contre 17–23 ms pour `model.predict()` (surcoût Python/launchs CUDA sous Windows,
     indépendant de la taille du modèle). Sinon (CPU, --no-trt, export impossible) : `model.predict()`."""
 
-    def __init__(self, model: str, imgsz: int, device: str, conf: float, half: bool, trt: bool = True) -> None:
+    def __init__(self, model: str, imgsz: int, device: str, conf: float, half: bool, trt: bool = True, square: bool = False) -> None:
         import torch
         from ultralytics import YOLO
 
@@ -99,8 +99,8 @@ class Detector:
         self._protos = None   # (32, mh, mw) de la dernière frame (moteur TensorRT)
         self._coefs = []      # un vecteur de 32 coefficients par boîte retournée par boxes()
         self._masks = None    # predict() : masques (n, h, w) de la dernière frame
-        # entrée réseau pour une frame 16:9 : largeur imgsz, hauteur arrondie au multiple de 32 supérieur
-        self.in_w, self.in_h = imgsz, int(math.ceil(imgsz * 9 / 16 / 32) * 32)
+        # entrée réseau : frame 16:9 → largeur imgsz, hauteur au multiple de 32 supérieur ; carré (crop) → imgsz × imgsz
+        self.in_w, self.in_h = imgsz, (imgsz if square else int(math.ceil(imgsz * 9 / 16 / 32) * 32))
         if self.device.startswith("cuda") and (trt or model.endswith(".engine")):
             try:
                 self._load_engine(model)
@@ -110,7 +110,7 @@ class Detector:
             self.model = YOLO(model)
             self.name = f"{os.path.basename(model)} @{imgsz} {self.device}{' fp16' if self.half else ''} predict()"
             self.model.predict(np.zeros((self.in_h, self.in_w, 3), np.uint8), **self._kw())  # warm-up
-        self.boxes(np.zeros((720, 1280, 3), np.uint8))  # cuDNN/TensorRT autotune à la vraie forme
+        self.boxes(np.zeros((self.in_h, self.in_w, 3) if square else (720, 1280, 3), np.uint8))  # autotune à la vraie forme
 
     def _load_engine(self, model: str) -> None:
         from ultralytics import YOLO
