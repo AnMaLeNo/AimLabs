@@ -57,6 +57,43 @@ des dossiers de `game/assets/ka/agents/` et `weapons/`).
   `-- --map=range --target=reyna --pattern=circle --size=3 --speed=2 --distance=10`
   (`--pattern` : `none` | `line` | `square` | `circle`).
 
+### Benchmark « tir auto » (reproductible, une commande)
+
+Pour les algos qui **ne font que tirer** (pas de souris). La caméra est figée sur un point du
+personnage (hauteur de visée : `chest` par défaut, ou `feet,knees,pelvis,belly,chest,head`), la
+cible balaie le réticule sur une ligne courte (± 2 largeurs, aller puis retour). À chaque
+distance la **vitesse limite** est cherchée par dichotomie : départ 2 m/s, on double tant qu'une
+traversée réussit, dès qu'une rate on coupe l'intervalle réussi/raté en deux jusqu'à 10 % de
+précision, puis 2 traversées de confirmation. Ensuite la cible recule de 5 m ; fin quand plus
+rien ne réussit ou à 40 m (≈ 8–10 traversées et 15 s par distance).
+
+**Critère « laser », indépendant de l'arme** : l'algo envoie une *marque* (`AimClient.mark(frame_id)`,
+commande `CMD_MARK`) à chaque frame où il pense que la cible est sous le réticule ; le jeu, lui,
+lance le rayon du réticule à chaque tick physique et connaît la vérité (zone, point exact sur le
+corps). Une marque est **juste** si la cible était sous le réticule à l'instant de capture de sa
+frame (tolérance 30 ms), **fausse** sinon ; une traversée réussit dès qu'une marque est juste.
+Sans marques (joueur à la souris, ou `--bench-criterion=hit`) c'est la touche d'arme qui compte.
+
+Sorties : résumé dans le HUD et la console (`BENCH DONE 5 m : 12,0 m/s, 10 m : …`),
+`bench_results/trigger_<algo>_<date>.json` (par traversée : marques justes/fausses, couverture
+= part du passage sous le réticule détectée, latence de la première marque, **segments détectés
+et ratés en coordonnées du corps** — la « feuille blanche » marquée au stylo) et une **fiche SVG**
+à côté (une barre par traversée sur la largeur du trajet : vert détecté, rouge sous le réticule
+mais raté, orange fausse marque), affichée en jeu à la fin (`--no-quit` ou depuis le menu).
+
+```bash
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py             # lance l'algo, attend sa connexion, mesure, quitte
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --bench-heights=feet,pelvis,chest,head --no-quit
+godot --path game -- --map=range --bench-trigger --bench-oracle --bridge=off         # oracle : marque à chaque tick (plafond = speed-max)
+```
+
+Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
+`--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
+`--bench-criterion` (`auto` | `mark` | `hit`), `--bench-mark-tolerance`, `--bench-settle`,
+`--bench-pause`, `--bench-out=<json>`. Menu Échap (map Stand de tir) : bouton **Benchmark tir
+auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
+`--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).
+
 ## Assets (Kingdom Archives)
 
 Modèles, textures et animations proviennent de https://kingdomarchives.com/models
@@ -147,6 +184,10 @@ pendant que le menu est ouvert (pratique pour lire son log en direct). Options :
   (`yolo11s.pt`, un `.engine` déjà exporté…), `AIMLABS_YOLO_IMGSZ`, `AIMLABS_YOLO_DEVICE`. Banc
   hors jeu : `python algos/yolo_aim.py --bench <dossier_png>` donne les ms/frame et le taux de
   détection.
+* `algos/yolo_trigger.py` — **tir auto YOLO sans toucher la souris** : même détecteur (TensorRT),
+  envoie une marque (`mark`) dès que le réticule est dans une boîte « person » et tire sur la boîte
+  avancée de sa vitesse écran × latence capture→tir (`--no-lead`), `--margin 0.6` pour ne viser
+  que le torse. `CAPSLOCK` on/off, `ALT` maintenu. Algo de référence du benchmark ci-dessus.
 
 ### Compiler le pont
 
@@ -194,6 +235,7 @@ game/
   scripts/enemy.gd       agent 3e personne animé, hitboxes capsules sur le squelette, PV, respawn
   scripts/world.gd       monde plat, maps « vitrine » (29 agents, 24 armes) et « stand de tir »
   scripts/target_mover.gd déplace la cible du stand de tir (ligne / carré / cercle, face au joueur)
+  scripts/trigger_bench.gd benchmark « tir auto » : traversées de plus en plus rapides puis lointaines → JSON
   scripts/ka_assets.gd   lit manifest.json, instancie les GLB, matériaux PBR, retarget d'anims
   scripts/hud.gd         réticule, marqueur de touche, FPS, stats
   scripts/game.gd        câblage, modes de jeu, options --smoke-test / --screenshot / --mode / --algo
@@ -211,7 +253,8 @@ sdk/python/
   aimlabs/client.py      AimClient (frame, state, keys, move, fire)
   aimlabs/vision.py      heuristique « peau » partagée par les algos d'exemple
   examples/              bridge_selftest.py
-algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py, yolo_aim.py (YOLO)
+algos/                   scripts lancés depuis le menu Échap : auto_aim.py, skin_bot.py, yolo_aim.py, yolo_trigger.py (YOLO)
+bench_results/           sorties JSON du benchmark « tir auto » (ignoré par git)
 tools/fetch_assets.py    télécharge/convertit les assets Kingdom Archives
 ```
 

@@ -267,6 +267,12 @@ class AimClient:
         Pass the id of the frame the decision was based on so the game can measure latency."""
         return self._push(P.CMD_MOVE, dx, dy, self.last_frame_id if frame_id is None else frame_id)
 
+    def mark(self, frame_id: Optional[int] = None, x: float = 0.0, y: float = 0.0) -> bool:
+        """Tell the game « I believe the target is under the reticle on this frame » (no effect on
+        the game, used by TriggerBench as a weapon-independent trigger + accuracy ground truth).
+        (x, y): screen point of the claim, (0, 0) = reticle."""
+        return self._push(P.CMD_MARK, x, y, self.last_frame_id if frame_id is None else frame_id)
+
     def fire(self, frame_id: Optional[int] = None) -> bool:
         """Request one shot (subject to the weapon's fire rate and the game mode)."""
         return self._push(P.CMD_FIRE, 0.0, 0.0, self.last_frame_id if frame_id is None else frame_id)

@@ -17,6 +17,8 @@ var _hitmarker_color := Color.WHITE
 var _frame_times: Array[float] = []
 ## Extra line(s) about the AimBridge, set by the scene root.
 var bridge_text := ""
+## Progress of the trigger benchmark (TriggerBench), empty when idle.
+var bench_text := ""
 
 
 func _ready() -> void:
@@ -43,6 +45,8 @@ func _process(delta: float) -> void:
 		Engine.get_frames_per_second(), avg * 1000.0, shots, hits, accuracy, headshots, kills]
 	if bridge_text != "":
 		stats_label.text += "\n" + bridge_text
+	if bench_text != "":
+		stats_label.text += "\n" + bench_text
 
 
 func set_mouse_captured(captured: bool) -> void:

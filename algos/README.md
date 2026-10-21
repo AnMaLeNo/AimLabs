@@ -19,5 +19,10 @@ le segment partagé en cours). La première ligne de la docstring sert de descri
   à l'avance, jeu fermé : `python algos/yolo_aim.py --export` (avec le jeu ouvert c'est bien plus
   long). Poids et moteurs sont rangés dans `algos/` quel que soit le dossier de lancement.
   Banc hors jeu : `python algos/yolo_aim.py --bench dossier_png` (ms/frame + taux de détection).
+- `yolo_trigger.py` — tir auto YOLO sans bouger la souris : `mark()` (« cible sous le réticule »,
+  critère du benchmark) dès que le réticule est dans une boîte « person », tir sur la boîte avancée
+  de vitesse × latence (`--no-lead` ; `--margin 0.6` = torse seulement) ; `CAPSLOCK` on/off, `ALT`
+  maintenu ; démarre armé si `AIMLABS_AUTOSTART=1` (posé par le jeu en `--bench-trigger`). Benchmark :
+  `godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py` → `bench_results/*.json`.
 
 Pour pointer le jeu sur un autre dossier : `--algos=/chemin` (ou le bouton « Dossier » du menu).

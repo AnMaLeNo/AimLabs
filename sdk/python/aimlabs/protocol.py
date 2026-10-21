@@ -12,6 +12,7 @@ MODE_FIRE = 1 << 2
 
 CMD_MOVE = 1
 CMD_FIRE = 2
+CMD_MARK = 3  # « la cible est sous le réticule » (benchmarks), dx/dy = point écran
 
 KEY_FORWARD = 1 << 0
 KEY_BACK = 1 << 1

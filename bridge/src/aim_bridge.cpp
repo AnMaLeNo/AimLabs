@@ -132,6 +132,7 @@ void AimBridge::_bind_methods() {
 
 	ADD_SIGNAL(MethodInfo("assist_move", PropertyInfo(Variant::VECTOR2, "delta_px")));
 	ADD_SIGNAL(MethodInfo("assist_fire"));
+	ADD_SIGNAL(MethodInfo("assist_mark", PropertyInfo(Variant::INT, "frame_id"), PropertyInfo(Variant::INT, "capture_usec"), PropertyInfo(Variant::VECTOR2, "point_px")));
 	ADD_SIGNAL(MethodInfo("client_connected_changed", PropertyInfo(Variant::BOOL, "connected")));
 }
 
@@ -504,6 +505,17 @@ void AimBridge::_drain_commands() {
 			applied = true;
 		} else if (c.type == CMD_FIRE && _allow_fire) {
 			emit_signal("assist_fire");
+			applied = true;
+		} else if (c.type == CMD_MARK) {
+			int64_t capture = -1;
+			{
+				std::lock_guard<std::mutex> lock(_history_mutex);
+				uint32_t i = (uint32_t)(c.frame_id % HISTORY);
+				if (c.frame_id != 0 && _history_id[i] == c.frame_id) {
+					capture = (int64_t)_history_usec[i];
+				}
+			}
+			emit_signal("assist_mark", (int64_t)c.frame_id, capture, Vector2(c.dx, c.dy));
 			applied = true;
 		}
 		if (!applied) {
