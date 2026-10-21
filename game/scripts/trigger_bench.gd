@@ -487,37 +487,110 @@ static func _esc(t: String) -> String:
 	return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-## Show the SVG « fiche » in game (CanvasLayer, closed by show_sheet(false) / a click).
+## Bar of one sweep drawn with Godot (the in-game SVG renderer has no text support).
+class SheetBar extends Control:
+	var half := 2.4
+	var sweep: Dictionary = {}
+	func _draw() -> void:
+		var w := size.x
+		var h := size.y
+		draw_rect(Rect2(0, 2, w, h - 4), Color("#333"))
+		var px := func(local_x: float) -> float: return (clampf(-local_x, -half, half) + half) / (2.0 * half) * w
+		for seg in sweep.get("missed_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			draw_rect(Rect2(minf(a, b), 2, maxf(absf(b - a), 1.0), h - 4), Color("#d33"))
+		for seg in sweep.get("detected_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			draw_rect(Rect2(minf(a, b), 2, maxf(absf(b - a), 1.0), h - 4), Color("#3c3"))
+		for fx in sweep.get("false_positive_path_x", []):
+			var a: float = (clampf(float(fx), -half, half) + half) / (2.0 * half) * w
+			draw_rect(Rect2(a, 0, 2, h), Color("#fa0"))
+		draw_line(Vector2(w * 0.5, 0), Vector2(w * 0.5, h), Color.WHITE, 1.0)
+
+
+func _label(text: String, color: Color = Color("#ddd"), size_px: int = 13, bold: bool = false) -> Label:
+	var l := Label.new()
+	l.text = text
+	l.add_theme_color_override("font_color", color)
+	l.add_theme_font_size_override("font_size", size_px)
+	if bold:
+		l.add_theme_color_override("font_color", Color.WHITE)
+	return l
+
+
+## Show the « fiche » in game (CanvasLayer with real Labels + drawn bars; click to close).
 func show_sheet(visible_sheet: bool = true) -> void:
 	hide_sheet()
-	if not visible_sheet or svg_text == "":
+	if not visible_sheet or result.is_empty():
 		return
-	var img := Image.new()
-	if img.load_svg_from_string(svg_text, 1.0) != OK:
-		push_warning("TriggerBench: SVG rendering failed")
-		return
+	var half := _half_travel if _half_travel > 0.0 else float(config["width"]) * float(config["travel_widths"])
 	_sheet_layer = CanvasLayer.new()
 	_sheet_layer.layer = 50
 	var bg := ColorRect.new()
-	bg.color = Color(0, 0, 0, 0.7)
+	bg.color = Color(0.08, 0.09, 0.11, 0.97)
 	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
-	bg.gui_input.connect(func(ev: InputEvent) -> void:
-		if ev is InputEventMouseButton and ev.pressed:
-			hide_sheet())
 	_sheet_layer.add_child(bg)
 	var scroll := ScrollContainer.new()
 	scroll.set_anchors_preset(Control.PRESET_FULL_RECT)
-	scroll.offset_left = 20
-	scroll.offset_top = 20
-	scroll.offset_right = -20
-	scroll.offset_bottom = -20
-	scroll.mouse_filter = Control.MOUSE_FILTER_PASS
-	var tex := TextureRect.new()
-	tex.texture = ImageTexture.create_from_image(img)
-	tex.stretch_mode = TextureRect.STRETCH_KEEP
-	tex.mouse_filter = Control.MOUSE_FILTER_PASS
-	scroll.add_child(tex)
+	scroll.offset_left = 16
+	scroll.offset_top = 12
+	scroll.offset_right = -16
+	scroll.offset_bottom = -12
 	_sheet_layer.add_child(scroll)
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 3)
+	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(root)
+	root.add_child(_label("Benchmark tir auto : %s · arme %s · cible %s · critère %s" % [result["algo"], result["weapon"], result["target"], result["criterion"]], Color.WHITE, 18))
+	root.add_child(_label("%s · résumé : %s" % [result.get("started", ""), result.get("summary", "")], Color("#aaa"), 12))
+	root.add_child(_label("Chaque ligne = une traversée : distance · vitesse · sens (→ gauche→droite, ← droite→gauche, vu par le joueur) · résultat. La barre = le trajet de la cible (± %.1f m autour du réticule), le trait blanc = le réticule." % half, Color("#ccc"), 12))
+	for item in [["#3c3", "vert : cible sous le réticule et marquée par l'algo (détectée)"], ["#d33", "rouge : cible sous le réticule mais aucune marque (ratée)"],
+			["#fa0", "orange : marque envoyée alors que la cible n'était pas sous le réticule (fausse marque)"], ["#333", "gris : cible hors du réticule"]]:
+		var row := HBoxContainer.new()
+		var sw := ColorRect.new()
+		sw.color = Color(item[0])
+		sw.custom_minimum_size = Vector2(22, 12)
+		row.add_child(sw)
+		row.add_child(_label(item[1], Color("#ccc"), 12))
+		root.add_child(row)
+	var close := Button.new()
+	close.text = "Fermer la fiche (clic)   —   fichier : %s" % (out_path.get_basename() + ".svg" if out_path != "" else "non enregistré")
+	close.pressed.connect(hide_sheet)
+	root.add_child(close)
+	for h in result["heights"]:
+		root.add_child(_label("Hauteur de visée : %s (réticule à y = %.2f m du sol)" % [h["height"], h["aim_y"]], Color.WHITE, 14, true))
+		for d in h["distances"]:
+			root.add_child(_label("   Distance %.0f m — vitesse limite trouvée : %.2f m/s" % [d["distance"], d["max_speed_hit"]], Color("#eee"), 13, true))
+			var sweeps: Array = d["sweeps"].duplicate()
+			sweeps.sort_custom(func(a, b): return float(a["speed"]) < float(b["speed"]))
+			for sw in sweeps:
+				var ok: bool = (int(sw["marks_correct"]) > 0) if _criterion == "mark" else (int(sw["hits"]) > 0)
+				var lat = sw.get("first_mark_latency_ms")
+				var arrow := "→ gauche→droite" if float(sw.get("dir", 1.0)) > 0.0 else "← droite→gauche"
+				var row := HBoxContainer.new()
+				row.add_theme_constant_override("separation", 10)
+				var text := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s" % [
+					float(d["distance"]), float(sw["speed"]), arrow, "OK" if ok else "raté", " (conf.)" if sw.get("confirm", false) else "",
+					int(sw["marks_correct"]), int(sw["marks"]), 100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else ""]
+				var l := _label(text, Color("#9f9") if ok else Color("#f99"), 12)
+				l.custom_minimum_size.x = 620
+				row.add_child(l)
+				var bar := SheetBar.new()
+				bar.half = half
+				bar.sweep = sw
+				bar.custom_minimum_size = Vector2(480, 16)
+				row.add_child(bar)
+				row.add_child(_label("→" if float(sw.get("dir", 1.0)) > 0.0 else "←", Color("#ccc"), 14))
+				root.add_child(row)
+			var axis := HBoxContainer.new()
+			axis.add_theme_constant_override("separation", 10)
+			var spacer := Control.new()
+			spacer.custom_minimum_size.x = 620
+			axis.add_child(spacer)
+			axis.add_child(_label("← à gauche du réticule : −%.1f m  ·  trait blanc = réticule (0)  ·  +%.1f m : à droite →" % [half, half], Color("#aaa"), 11))
+			root.add_child(axis)
 	game.add_child(_sheet_layer)
 
 
