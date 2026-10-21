@@ -114,10 +114,10 @@ func _build_hitboxes() -> void:
 			continue
 		_add_capsule(String(seg[2]), LAYER_ENEMY_BODY, a, b, float(seg[3]))
 	# hips: the leg capsules start at the Pelvis bone (~1.23 m) and leave the coat/hips uncovered
-	# (bench visual probe: silhouette 0.65 m wide at 1.0 m, hitbox 0.3 m) → one wider capsule
+	# (bench visual probe: silhouette 0.65 m wide at 1.0 m, hitbox 0.3 m) → one capsule as wide as the coat
 	var pelvis: Variant = _bone_pos("Pelvis", skel_xf)
 	if pelvis != null:
-		_add_capsule("body", LAYER_ENEMY_BODY, pelvis, pelvis - Vector3(0, 0.3, 0), 0.2)
+		_add_capsule("body", LAYER_ENEMY_BODY, pelvis, pelvis - Vector3(0, 0.3, 0), 0.3)
 	var head: Variant = _bone_pos("Head", skel_xf)
 	if head != null:
 		var top: Vector3 = head + Vector3(0, 0.16, 0)
