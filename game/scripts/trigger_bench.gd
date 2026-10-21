@@ -393,46 +393,76 @@ func save_json(path: String) -> bool:
 	return true
 
 
-## « Fiche » : one bar per sweep across the body width (local x, metres), green = detected,
-## red = under the reticle but no correct mark, orange ticks = false positives (path position).
+## « Fiche » : one row per sweep (distance, speed, direction), a bar = the body sweep across the
+## reticle in metres as seen by the player; green = detected, red = under the reticle but no
+## correct mark, orange = false mark (claimed while the target was not under the reticle).
 func build_svg() -> String:
 	var w := float(config["width"])
 	var half := _half_travel if _half_travel > 0.0 else w * 2.0
 	var bar_w := 520.0
-	var x0 := 430.0
-	var row_h := 14.0
+	var x0 := 560.0
+	var row_h := 16.0
 	var rows := []
 	for h in result["heights"]:
-		rows.append(["title", "Hauteur de visée : %s (y = %.2f m)" % [h["height"], h["aim_y"]]])
+		rows.append(["title", "Hauteur de visée : %s (réticule à y = %.2f m du sol)" % [h["height"], h["aim_y"]]])
 		for d in h["distances"]:
-			rows.append(["title", "   %.0f m — vitesse limite %.2f m/s" % [d["distance"], d["max_speed_hit"]]])
+			rows.append(["dist", "Distance %.0f m — vitesse limite trouvée : %.2f m/s" % [d["distance"], d["max_speed_hit"]], d])
 			var sweeps: Array = d["sweeps"].duplicate()
 			sweeps.sort_custom(func(a, b): return float(a["speed"]) < float(b["speed"]))
 			for sw in sweeps:
-				rows.append(["sweep", sw])
-	var height := 70.0 + rows.size() * row_h + 30.0
+				rows.append(["sweep", sw, d])
+			rows.append(["axis"])
+	var total_w := x0 + bar_w + 40.0
 	var out := PackedStringArray()
-	out.append('<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" font-family="sans-serif" font-size="11">' % [int(x0 + bar_w + 40.0), int(height)])
+	out.append("")  # <svg …> written at the end, once the height is known
 	out.append('<rect width="100%" height="100%" fill="#14161c"/>')
 	out.append('<text x="14" y="22" fill="#eee" font-size="16">AimLabs — benchmark tir auto : %s · arme %s · cible %s · critère %s</text>' % [
 		_esc(String(result["algo"])), _esc(String(result["weapon"])), _esc(String(result["target"])), String(result["criterion"])])
-	out.append('<text x="14" y="40" fill="#aaa">%s · %s</text>' % [_esc(String(result.get("started", ""))), _esc(String(result.get("summary", "")))])
-	out.append('<text x="14" y="58" fill="#aaa">barre = largeur du trajet (± %.1f m autour du réticule) · vert = détecté · rouge = sous le réticule mais raté · orange = fausse marque · gris = cible hors réticule</text>' % half)
-	var y := 70.0
+	out.append('<text x="14" y="40" fill="#aaa">%s · résumé : %s</text>' % [_esc(String(result.get("started", ""))), _esc(String(result.get("summary", "")))])
+	out.append('<text x="14" y="62" fill="#ddd">Chaque ligne = une traversée : distance · vitesse · sens (→ gauche→droite, ← droite→gauche, vu par le joueur) · résultat.</text>')
+	out.append('<text x="14" y="78" fill="#ddd">La barre = le trajet de la cible (± %.1f m de part et d\'autre du réticule, échelle en mètres sous chaque groupe) ; le trait blanc = le réticule.</text>' % half)
+	var ly := 96.0
+	for item in [["#3c3", "vert : la cible était sous le réticule et l\'algo l\'a marquée (détectée)"],
+			["#d33", "rouge : la cible était sous le réticule mais aucune marque (ratée)"],
+			["#fa0", "orange : marque envoyée alors que la cible n\'était pas sous le réticule (fausse marque)"],
+			["#333", "gris : cible hors du réticule, rien à détecter"]]:
+		out.append('<rect x="14" y="%.0f" width="22" height="10" fill="%s"/>' % [ly - 9.0, item[0]])
+		out.append('<text x="42" y="%.0f" fill="#ccc">%s</text>' % [ly, item[1]])
+		ly += 14.0
+	var y := ly + 10.0
+	var px := func(local_x: float) -> float: return x0 + (clampf(-local_x, -half, half) + half) / (2.0 * half) * bar_w
 	for r in rows:
 		if r[0] == "title":
-			out.append('<text x="14" y="%.0f" fill="#ddd" font-size="12">%s</text>' % [y + 11.0, _esc(r[1])])
+			out.append('<text x="14" y="%.0f" fill="#fff" font-size="13" font-weight="bold">%s</text>' % [y + 12.0, _esc(r[1])])
+			y += row_h + 4.0
+			continue
+		if r[0] == "dist":
+			out.append('<text x="24" y="%.0f" fill="#ddd" font-size="12" font-weight="bold">%s</text>' % [y + 12.0, _esc(r[1])])
 			y += row_h
 			continue
+		if r[0] == "axis":
+			var step := 0.5 if half <= 3.0 else 1.0
+			var m := -floorf(half / step) * step
+			while m <= half + 1e-6:
+				var ax: float = x0 + (m + half) / (2.0 * half) * bar_w
+				out.append('<line x1="%.1f" y1="%.0f" x2="%.1f" y2="%.0f" stroke="#888"/>' % [ax, y, ax, y + 4.0])
+				out.append('<text x="%.1f" y="%.0f" fill="#aaa" font-size="9" text-anchor="middle">%s</text>' % [ax, y + 14.0, "réticule" if absf(m) < 1e-6 else "%+.1f m" % m])
+				m += step
+			out.append('<text x="%.0f" y="%.0f" fill="#aaa" font-size="9">← à gauche du réticule (vu par le joueur)</text>' % [x0, y + 26.0])
+			out.append('<text x="%.0f" y="%.0f" fill="#aaa" font-size="9" text-anchor="end">à droite du réticule →</text>' % [x0 + bar_w, y + 26.0])
+			y += row_h + 22.0
+			continue
 		var sw: Dictionary = r[1]
+		var d: Dictionary = r[2]
 		var ok: bool = (int(sw["marks_correct"]) > 0) if _criterion == "mark" else (int(sw["hits"]) > 0)
 		var lat = sw.get("first_mark_latency_ms")
-		var label := "%.2f m/s %s%s · marques %d/%d · couv. %.0f %%%s" % [float(sw["speed"]), "OK" if ok else "raté",
-			" (conf.)" if sw.get("confirm", false) else "", int(sw["marks_correct"]), int(sw["marks"]), 100.0 * float(sw["coverage"]),
-			(" · lat. %.0f ms" % float(lat)) if lat != null else ""]
-		out.append('<text x="40" y="%.0f" fill="%s">%s</text>' % [y + 10.0, "#9f9" if ok else "#f99", _esc(label)])
+		var arrow := "→ gauche→droite" if float(sw.get("dir", 1.0)) > 0.0 else "← droite→gauche"
+		var label := "%.0f m · %5.2f m/s · %s · %s%s · marques %d justes / %d · couverture %.0f %%%s" % [
+			float(d["distance"]), float(sw["speed"]), arrow, "OK" if ok else "raté",
+			" (confirmation)" if sw.get("confirm", false) else "", int(sw["marks_correct"]), int(sw["marks"]),
+			100.0 * float(sw["coverage"]), (" · 1re marque %.0f ms" % float(lat)) if lat != null else ""]
+		out.append('<text x="40" y="%.0f" fill="%s">%s</text>' % [y + 11.0, "#9f9" if ok else "#f99", _esc(label)])
 		out.append('<rect x="%.0f" y="%.0f" width="%.0f" height="%.0f" fill="#333"/>' % [x0, y + 2.0, bar_w, row_h - 4.0])
-		var px := func(local_x: float) -> float: return x0 + (clampf(-local_x, -half, half) + half) / (2.0 * half) * bar_w
 		for seg in sw.get("missed_segments", []):
 			var a: float = px.call(float(seg[0]))
 			var b: float = px.call(float(seg[1]))
@@ -445,8 +475,11 @@ func build_svg() -> String:
 			var a: float = x0 + (clampf(float(fx), -half, half) + half) / (2.0 * half) * bar_w
 			out.append('<rect x="%.1f" y="%.0f" width="2" height="%.0f" fill="#fa0"/>' % [a, y, row_h])
 		out.append('<line x1="%.0f" y1="%.0f" x2="%.0f" y2="%.0f" stroke="#fff" stroke-width="1"/>' % [x0 + bar_w * 0.5, y, x0 + bar_w * 0.5, y + row_h])
+		var ax0 := x0 + bar_w + 6.0
+		out.append('<text x="%.0f" y="%.0f" fill="#ccc" font-size="12">%s</text>' % [ax0, y + 12.0, "→" if float(sw.get("dir", 1.0)) > 0.0 else "←"])
 		y += row_h
 	out.append('</svg>')
+	out[0] = '<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" font-family="sans-serif" font-size="11">' % [int(total_w), int(y + 20.0)]
 	return "\n".join(out)
 
 
