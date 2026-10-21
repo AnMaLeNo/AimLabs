@@ -831,7 +831,7 @@ func _physics_process(delta: float) -> void:
 			_ticks.append([now, gt[0], gt[1], gt[2], gt[3], _x])
 			if bool(config["oracle"]):
 				_player.request_fire_from_assist()
-				if gt[0]:
+				if (_visible_at(now) if _truth == "visual" else gt[0]):
 					_marks.append([now, now, 0])
 			if absf(_x) > _half_travel:
 				_end_pass()
