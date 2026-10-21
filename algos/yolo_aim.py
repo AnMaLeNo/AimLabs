@@ -95,6 +95,10 @@ class Detector:
         self.last_ms = 0.0
         self.engine = None
         model = resolve_model(model)
+        self.seg = "-seg" in os.path.basename(model)  # yolo11n-seg : masques de segmentation en plus des boîtes
+        self._protos = None   # (32, mh, mw) de la dernière frame (moteur TensorRT)
+        self._coefs = []      # un vecteur de 32 coefficients par boîte retournée par boxes()
+        self._masks = None    # predict() : masques (n, h, w) de la dernière frame
         # entrée réseau pour une frame 16:9 : largeur imgsz, hauteur arrondie au multiple de 32 supérieur
         self.in_w, self.in_h = imgsz, int(math.ceil(imgsz * 9 / 16 / 32) * 32)
         if self.device.startswith("cuda") and (trt or model.endswith(".engine")):
@@ -126,7 +130,7 @@ class Detector:
                 out = YOLO(model).export(format="engine", half=True, imgsz=(self.in_h, self.in_w), device=0, verbose=False)
                 os.replace(out, engine)
         self.engine = AutoBackend(engine, device=self.torch.device(self.device), fp16=True, verbose=False)
-        self.name = f"{os.path.basename(engine)} TensorRT fp16 {self.device}"
+        self.name = f"{os.path.basename(engine)} TensorRT fp16 {self.device}{' seg' if self.seg else ''}"
 
     def _kw(self) -> dict:
         kw = dict(imgsz=self.imgsz, conf=self.conf, classes=[PERSON_CLASS], device=self.device, verbose=False)
@@ -137,14 +141,23 @@ class Detector:
     def _raw_boxes(self, rgb: np.ndarray) -> List[Tuple[float, float, float, float, float]]:
         if self.engine is None:
             r = self.model.predict(rgb, **self._kw())[0]
+            self._masks = r.masks.data if (self.seg and r.masks is not None) else None
+            self._raw_coefs = None
             return [(*b, c) for b, c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist())]
         torch, h, w = self.torch, rgb.shape[0], rgb.shape[1]
         with torch.inference_mode():
             x = torch.from_numpy(rgb).to(self.device, non_blocking=True).permute(2, 0, 1)[None].float() / 255.0
             x = torch.nn.functional.interpolate(x, size=(self.in_h, self.in_w), mode="bilinear", align_corners=False)
             y = self.engine(x)  # le moteur attend du fp32 en entrée (il calcule en fp16)
-            y = y[0] if isinstance(y, (list, tuple)) else y
-            det = self._nms(y.float(), self.conf, 0.45, classes=[PERSON_CLASS])[0].cpu()
+            protos = None
+            if isinstance(y, (list, tuple)):
+                if self.seg and len(y) > 1:
+                    protos = y[1][0] if y[1].dim() == 4 else y[1]
+                y = y[0]
+            det = self._nms(y.float(), self.conf, 0.45, classes=[PERSON_CLASS], nc=80)[0]
+            self._protos = protos.float() if protos is not None else None
+            self._raw_coefs = det[:, 6:] if self.seg and det.shape[1] > 6 else None
+            det = det[:, :6].cpu()
         sx, sy = w / self.in_w, h / self.in_h
         return [(x1 * sx, y1 * sy, x2 * sx, y2 * sy, c) for x1, y1, x2, y2, c, _cls in det.tolist()]
 
@@ -154,13 +167,36 @@ class Detector:
         raw = self._raw_boxes(rgb)
         self.last_ms = (time.perf_counter() - t0) * 1000.0
         h = rgb.shape[0]
+        self._frame_hw = rgb.shape[:2]
         out = []
-        for x1, y1, x2, y2, c in raw:
+        self._coefs = []
+        for i, (x1, y1, x2, y2, c) in enumerate(raw):
             bw, bh = x2 - x1, y2 - y1
             if y2 > 0.97 * h and bh < 1.2 * bw:  # bras + arme du joueur : large, tronqué par le bas
                 continue
             out.append((x1, y1, x2, y2, c))
+            self._coefs.append(i)
         return out
+
+    def mask_at(self, box_index: int, x: float, y: float) -> float:
+        """Probabilité (0–1) que le pixel (x, y) de la frame appartienne au masque de la boîte
+        `box_index` (index dans la liste retournée par boxes()). 1.0 sans modèle de segmentation."""
+        if not self.seg or box_index >= len(self._coefs):
+            return 1.0
+        raw_i = self._coefs[box_index]
+        fh, fw = self._frame_hw
+        if self._protos is not None and self._raw_coefs is not None:
+            mh, mw = self._protos.shape[1], self._protos.shape[2]
+            px = min(max(int(x * mw / fw), 0), mw - 1)
+            py = min(max(int(y * mh / fh), 0), mh - 1)
+            logit = (self._raw_coefs[raw_i] * self._protos[:, py, px]).sum()
+            return float(self.torch.sigmoid(logit))
+        if self._masks is not None and raw_i < self._masks.shape[0]:
+            mh, mw = self._masks.shape[1], self._masks.shape[2]
+            px = min(max(int(x * mw / fw), 0), mw - 1)
+            py = min(max(int(y * mh / fh), 0), mh - 1)
+            return float(self._masks[raw_i, py, px])
+        return 1.0
 
 
 def pick_target(boxes, cx: float, cy: float, head: bool) -> Optional[Tuple[float, float, float, float]]:

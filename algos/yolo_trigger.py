@@ -33,11 +33,16 @@ STATS_EVERY = 2.0
 
 def parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--model", default=os.environ.get("AIMLABS_YOLO_MODEL", "yolo11n.pt"))
+    ap.add_argument("--mode", choices=["box", "seg"], default=os.environ.get("AIMLABS_TRIGGER_MODE", "box"),
+                    help="box : le réticule est dans la boîte (× --margin) ; seg : le pixel du réticule est dans le "
+                         "masque de segmentation de la personne (modèle *-seg, précis aux bras/contours)")
+    ap.add_argument("--model", default=os.environ.get("AIMLABS_YOLO_MODEL", ""),
+                    help="défaut : yolo11n.pt (box) ou yolo11n-seg.pt (seg)")
     ap.add_argument("--imgsz", type=int, default=int(os.environ.get("AIMLABS_YOLO_IMGSZ", "640")))
     ap.add_argument("--device", default=os.environ.get("AIMLABS_YOLO_DEVICE", ""), help="cuda:0, cpu… (auto)")
     ap.add_argument("--conf", type=float, default=0.35)
-    ap.add_argument("--margin", type=float, default=1.0, help="fraction de la boîte (largeur et hauteur) autour de son centre où l'on tire")
+    ap.add_argument("--margin", type=float, default=float(os.environ.get("AIMLABS_TRIGGER_MARGIN", "1.0")),
+                    help="mode box : fraction de la boîte (largeur et hauteur) autour de son centre où l'on tire")
     ap.add_argument("--no-lead", action="store_true", help="pas d'avance de la boîte selon sa vitesse × latence")
     ap.add_argument("--no-half", action="store_true", help="FP32 même sur GPU")
     ap.add_argument("--no-trt", action="store_true", help="pas de moteur TensorRT, model.predict() seulement")
@@ -46,20 +51,30 @@ def parse_args(argv):
     return ap.parse_args(argv)
 
 
-def box_under(boxes, cx: float, cy: float, margin: float) -> Optional[Tuple[float, float, float, float, float]]:
-    """La boîte (réduite à `margin` de sa taille autour de son centre) qui contient le réticule, la plus confiante."""
+def box_under(boxes, cx: float, cy: float, margin: float, det=None, mask_xy=None) -> Optional[Tuple[float, float, float, float, float]]:
+    """La boîte (réduite à `margin` de sa taille autour de son centre) qui contient le réticule, la plus
+    confiante. Avec `det` (mode seg) : il faut de plus que le pixel `mask_xy` (coordonnées de la frame
+    capturée) soit dans le masque de segmentation de cette boîte."""
     best = None
-    for x1, y1, x2, y2, c in boxes:
+    for i, (x1, y1, x2, y2, c) in enumerate(boxes):
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         hw, hh = (x2 - x1) / 2 * margin, (y2 - y1) / 2 * margin
         if abs(cx - mx) <= hw and abs(cy - my) <= hh and (best is None or c > best[4]):
+            if det is not None and det.mask_at(i, *mask_xy) < 0.5:
+                continue
             best = (x1, y1, x2, y2, c)
     return best
 
 
 def main(argv) -> int:
     args = parse_args(argv)
+    if not args.model:
+        args.model = "yolo11n-seg.pt" if args.mode == "seg" else "yolo11n.pt"
+    if args.mode == "seg" and "-seg" not in os.path.basename(args.model):
+        print(f"--mode seg demande un modèle de segmentation (*-seg), pas {args.model}", flush=True)
+        return 2
     det = Detector(args.model, args.imgsz, args.device, args.conf, not args.no_half, not args.no_trt)
+    seg = det if args.mode == "seg" else None
     if args.export:
         print(f"prêt : {det.name}")
         return 0
@@ -68,7 +83,8 @@ def main(argv) -> int:
     n_frames, n_on, n_fire, ms_acc, t_stats = 0, 0, 0, 0.0, time.monotonic()
 
     with AimClient() as c:
-        print(f"yolo_trigger connecté, mode {c.mode}, modèle {det.name}. {TOGGLE_KEY}: on/off, {HOLD_KEY} maintenu: actif", flush=True)
+        print(f"yolo_trigger connecté, mode {c.mode}, modèle {det.name}, critère {args.mode}"
+              f"{f' (marge {args.margin:g})' if args.mode == 'box' else ''}. {TOGGLE_KEY}: on/off, {HOLD_KEY} maintenu: actif", flush=True)
         while True:
             f = c.frame(timeout=2.0)
             if f is None:
@@ -96,6 +112,7 @@ def main(argv) -> int:
             ms_acc += det.last_ms
             cx, cy = f.width / 2.0, f.height / 2.0
             shifted = boxes
+            lead_dx, lead_dy = 0.0, 0.0
             if not args.no_lead and prev is not None and boxes and prev[0] and f.capture_usec > prev[1]:
                 st = c.state()
                 # la balle part à la prochaine frame de jeu après réception : latence capture→maintenant + 1 frame
@@ -109,15 +126,17 @@ def main(argv) -> int:
                     vy = ((b[1] + b[3]) - (pb[1] + pb[3])) / 2 / dt
                     if abs(vx) * dt < 2 * (b[2] - b[0]) and dt < 0.5:  # suivi plausible
                         shifted.append((b[0] + vx * latency, b[1] + vy * latency, b[2] + vx * latency, b[3] + vy * latency, b[4]))
+                        lead_dx, lead_dy = vx * latency, vy * latency
                     else:
                         shifted.append(b)
             prev = (boxes, f.capture_usec)
             # marque = ce que l'image montre (vérité à la capture, pour le benchmark) ;
             # tir = boîte avancée de la latence (là où la cible sera quand la balle partira)
-            seen = box_under(boxes, cx, cy, args.margin)
+            seen = box_under(boxes, cx, cy, args.margin, seg, (cx, cy))
             if seen is not None:
                 c.mark(frame_id=f.id)
-            hit = box_under(shifted, cx, cy, args.margin)
+            # boîte avancée ⇔ masque de la frame échantillonné au réticule reculé de l'avance
+            hit = box_under(shifted, cx, cy, args.margin, seg, (cx - lead_dx, cy - lead_dy))
             fired = False
             if hit is not None:
                 n_on += 1
