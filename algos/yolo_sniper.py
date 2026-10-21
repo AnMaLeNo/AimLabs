@@ -89,7 +89,7 @@ class Track:
         t = t - t[-1]
         cx = np.array([p[1] for p in self.hist])
         cy = np.array([p[2] for p in self.hist])
-        if t.ptp() < 1e-4:
+        if float(np.ptp(t)) < 1e-4:
             return None
         ax, bx = np.polyfit(t, cx, 1)
         ay, by = np.polyfit(t, cy, 1)
