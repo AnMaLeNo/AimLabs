@@ -117,7 +117,7 @@ func _build_hitboxes() -> void:
 	if head != null:
 		var top: Vector3 = head + Vector3(0, 0.16, 0)
 		_add_capsule("head", LAYER_ENEMY_HEAD, head - Vector3(0, 0.02, 0), top, HEAD_RADIUS)
-		_head_local = head + Vector3(0, 0.07, 0)
+		_head_local = head + Vector3(0, 0.03, 0)  # eye level; +0.07 grazed the top of the skull (bench, visual probe)
 	var chest: Variant = _bone_pos("Spine3", skel_xf)
 	if chest != null:
 		_chest_local = chest

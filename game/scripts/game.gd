@@ -19,6 +19,8 @@ extends Node
 ##   --size=<m>            range: travel (line) / side (square) / radius (circle), default 4
 ##   --speed=<m/s>         range: speed along the path (default: 2)
 ##   --distance=<m>        range: distance spawn -> pattern centre (default: 10)
+##   --algo-args="…"       extra command-line arguments for --algo (e.g. "--mode seg")
+##   --show-hitboxes       draw collision shapes (check hitboxes against the visual model)
 ##   --bench-trigger       range: run the trigger benchmark (TriggerBench) then quit; with
 ##                         --algo the algo is started first and the bench waits for it.
 ##   --bench-<key>=<v>     TriggerBench.DEFAULTS keys: distance-start/-step/-max, speed-start/
@@ -59,6 +61,8 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		var kv := arg.split("=", true, 1)
 		_args[kv[0]] = kv[1] if kv.size() > 1 else true
+	if _args.has("--show-hitboxes"):
+		get_tree().debug_collisions_hint = true  # draw the capsules (benchmark sanity check)
 	player.shot_fired.connect(hud.on_shot_fired)
 	player.target_hit.connect(hud.on_target_hit)
 	player.mouse_capture_changed.connect(hud.set_mouse_captured)
@@ -99,7 +103,10 @@ func _ready() -> void:
 		if e.is_empty():
 			push_warning("--algo: '%s' not found in %s" % [_args["--algo"], runner.algos_dir])
 		else:
-			runner.start(e["path"])
+			var extra := PackedStringArray()
+			if _args.has("--algo-args"):
+				extra = String(_args["--algo-args"]).strip_edges().split(" ", false)
+			runner.start(e["path"], extra)
 	if _args.has("--bench-trigger"):
 		_start_bench_from_args()
 

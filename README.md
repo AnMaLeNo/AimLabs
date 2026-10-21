@@ -74,27 +74,38 @@ rien ne réussit ou à 40 m (≈ 8–10 traversées et 15 s par distance).
 
 **Critère « laser », indépendant de l'arme** : l'algo envoie une *marque* (`AimClient.mark(frame_id)`,
 commande `CMD_MARK`) à chaque frame où il pense que la cible est sous le réticule ; le jeu, lui,
-lance le rayon du réticule à chaque tick physique et connaît la vérité (zone, point exact sur le
-corps). Une marque est **juste** si la cible était sous le réticule à l'instant de capture de sa
-frame (tolérance 30 ms), **fausse** sinon ; une traversée réussit dès qu'une marque est juste.
-Sans marques (joueur à la souris, ou `--bench-criterion=hit`) c'est la touche d'arme qui compte.
+connaît la vérité. Une marque est **juste** si la cible était sous le réticule à l'instant de
+capture de sa frame (tolérance 30 ms), **fausse** sinon ; une traversée réussit dès qu'une marque
+est juste. Sans marques (joueur à la souris, ou `--bench-criterion=hit`) c'est la touche d'arme qui compte.
+
+**Deux vérités** (`--bench-truth=auto|visual|hitbox`) : la **silhouette visible** (défaut quand le
+jeu a un écran) — un petit viewport rend *uniquement* les mailles de la cible et lit le pixel sous le
+réticule à chaque frame rendue : c'est exactement ce qu'un algo de vision peut voir, indépendamment
+des hitboxes ; et la **hitbox** (rayon physique du réticule à chaque tick, seule vérité en headless).
+Les deux sont enregistrées et dessinées (filet bleu = silhouette, violet = hitbox) : leur écart
+mesure les défauts de hitbox (ex. : les capsules des jambes laissent un trou au bassin ; la
+capsule de tête dépasse au-dessus du crâne). La cible se déplace **par frame rendue**, pas par tick
+physique : à 30 m/s un tick de 60 Hz serait un saut de 0,5 m, toute la silhouette.
 
 Sorties : résumé dans le HUD et la console (`BENCH DONE 5 m : 12,0 m/s, 10 m : …`),
 `bench_results/trigger_<algo>_<date>.json` (par traversée : marques justes/fausses, couverture
 = part du passage sous le réticule détectée, latence de la première marque, **segments détectés
 et ratés en coordonnées du corps** — la « feuille blanche » marquée au stylo) et une **fiche SVG**
-à côté (une barre par traversée sur la largeur du trajet : vert détecté, rouge sous le réticule
-mais raté, orange fausse marque), affichée en jeu à la fin (`--no-quit` ou depuis le menu).
+à côté (une ligne par traversée — distance · vitesse · sens → / ← · résultat — et une barre sur la
+largeur du trajet, trait blanc = réticule : vert détecté, rouge sous le réticule mais raté, orange
+fausse marque), affichée en jeu à la fin (`--no-quit` ou depuis le menu).
 
 ```bash
 godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py             # lance l'algo, attend sa connexion, mesure, quitte
 godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py --bench-heights=feet,pelvis,chest,head --no-quit
 godot --path game -- --map=range --bench-trigger --bench-oracle --bridge=off         # oracle : marque à chaque tick (plafond = speed-max)
+godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py "--algo-args=--mode seg"   # options passées à l'algo
+godot --path game -- --map=range --show-hitboxes                                     # dessine les capsules (vérifier hitbox ↔ modèle)
 ```
 
 Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
 `--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
-`--bench-criterion` (`auto` | `mark` | `hit`), `--bench-mark-tolerance`, `--bench-settle`,
+`--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-mark-tolerance`, `--bench-settle`,
 `--bench-pause`, `--bench-out=<json>`. Menu Échap (map Stand de tir) : bouton **Benchmark tir
 auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
 `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).

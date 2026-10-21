@@ -25,6 +25,7 @@ const DEFAULTS := {
 	"speed_start": 2.0, "speed_min": 0.25, "speed_max": 150.0, "precision": 0.1, "confirm": 2,
 	"width": 1.2, "travel_widths": 2.0, "heights": "chest", "criterion": "auto",
 	"mark_tolerance": 0.03, "settle": 3.0, "pause": 0.3, "wait_client": false, "oracle": false,
+	"truth": "auto",  # visual (silhouette under the reticle, what a vision algo sees) | hitbox | auto = visual when the probe works
 }
 ## Aim heights as fraction of the head height (chest/head use the hitboxes directly).
 const HEIGHT_FRACTIONS := { "feet": 0.08, "knees": 0.3, "pelvis": 0.52, "belly": 0.62, "chest": -1.0, "head": -2.0 }
@@ -57,6 +58,13 @@ var _timer := 0.0
 var _x := 0.0
 var _pass_stats := {}
 var _ticks: Array = []     # per sweep: [usec, under(bool), zone, local_x, local_y, path_x]
+var _vis_samples: Array = []  # per sweep, one per RENDERED frame: [usec, visible(bool), hitbox(bool), local_x≈-path_x]
+const PROBE_LAYER := 1 << 19   # visual layer 20: the target's meshes, rendered alone by the probe
+const PROBE_PX := 16
+var _probe_vp: SubViewport
+var _probe_cam: Camera3D
+var _probe_ok := false
+var _truth := "hitbox"
 var _marks: Array = []     # per sweep: [recv_usec, capture_usec, frame_id]
 var _criterion := "hit"
 var _saved_respawn_delay := 3.0
@@ -87,6 +95,13 @@ func start(cfg: Dictionary = {}) -> bool:
 		if config.has(k):
 			config[k] = cfg[k]
 	_target = _world.target
+	_setup_probe()
+	_truth = String(config["truth"])
+	if _truth == "auto":
+		_truth = "visual" if _probe_ok else "hitbox"
+	elif _truth == "visual" and not _probe_ok:
+		push_warning("TriggerBench: visual truth unavailable (headless), falling back to hitbox")
+		_truth = "hitbox"
 	_saved_respawn_delay = _target.respawn_delay
 	_target.respawn_delay = 0.05
 	if _world.mover:
@@ -104,7 +119,7 @@ func start(cfg: Dictionary = {}) -> bool:
 	result = {
 		"algo": game.runner.current_name() if game.runner and game.runner.is_running() else ("oracle" if config["oracle"] else "human"),
 		"weapon": game.weapon_slug, "agent": game.agent_slug, "target": _world.target_slug,
-		"criterion": _criterion, "config": config.duplicate(),
+		"criterion": _criterion, "truth": _truth, "config": config.duplicate(),
 		"started": Time.get_datetime_string_from_system(), "fps": 0.0, "heights": [],
 	}
 	_height_index = 0
@@ -121,6 +136,9 @@ func stop() -> void:
 		return
 	running = false
 	_phase = "done"
+	if _probe_vp:
+		_probe_vp.queue_free()
+		_probe_vp = null
 	_target.respawn_delay = _saved_respawn_delay
 	if _world.mover:
 		_world.mover.set_physics_process(true)
@@ -176,6 +194,7 @@ func _begin_pass() -> void:
 	_pass_stats = { "speed": _speed, "dir": _dir, "hits": 0, "shots": 0, "headshots": 0, "killed": false,
 		"confirm": _confirm_left > 0 }
 	_ticks = []
+	_vis_samples = []
 	_marks = []
 	_phase = "cross"
 	var what := "confirmation %d/%d" % [int(config["confirm"]) - _confirm_left + 1, int(config["confirm"])] if _confirm_left > 0 else (
@@ -184,24 +203,151 @@ func _begin_pass() -> void:
 
 
 ## Ground truth + algo marks → segments on the body, correctness, coverage, latency.
+## « Visual truth » : a tiny SubViewport whose camera copies the player's camera (narrow FOV =
+## the few pixels around the reticle) and renders ONLY the target's meshes on a transparent
+## background. Centre pixel opaque ⇔ the target's silhouette is under the reticle. Compared
+## with the hitbox ray this measures how far the hitboxes are from what YOLO actually sees.
+func _setup_probe() -> void:
+	_probe_ok = false
+	if DisplayServer.get_name() == "headless":
+		return
+	for mi in _target._meshes:
+		mi.layers |= PROBE_LAYER
+	_probe_vp = SubViewport.new()
+	_probe_vp.size = Vector2i(PROBE_PX, PROBE_PX)
+	_probe_vp.transparent_bg = true
+	_probe_vp.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	_probe_vp.own_world_3d = false
+	_probe_vp.world_3d = _player.get_world_3d()
+	_probe_cam = Camera3D.new()
+	_probe_cam.cull_mask = PROBE_LAYER
+	_probe_cam.keep_aspect = Camera3D.KEEP_HEIGHT
+	_probe_vp.add_child(_probe_cam)
+	add_child(_probe_vp)
+	_probe_cam.make_current()
+	if not RenderingServer.frame_post_draw.is_connected(_on_frame_drawn):
+		RenderingServer.frame_post_draw.connect(_on_frame_drawn)
+	_probe_ok = true
+
+
+## Sampled once per rendered frame (the probe image only changes when a frame is drawn; on a
+## slow renderer several physics ticks share one frame, so ticks must not be used here).
+func _on_frame_drawn() -> void:
+	if running and _phase == "cross" and _probe_ok:
+		var vis := _probe_visible()
+		_vis_samples.append([Time.get_ticks_usec(), vis, bool(_ground_truth()[0]), -_x])
+
+
+func _process(delta: float) -> void:
+	if running and _phase == "cross":
+		# the target moves per RENDERED frame (not per 60 Hz physics tick): at 30 m/s a tick is a
+		# 0.5 m jump, the whole silhouette — the limit would measure the tick rate, not the algo
+		_x += _speed * delta * _dir
+		_target.position = Vector3(_x, 0.0, -_distance)
+		_face_player()
+	if running and _probe_ok:
+		var cam := _player.camera
+		_probe_cam.global_transform = cam.global_transform
+		_probe_cam.near = cam.near
+		_probe_cam.far = cam.far
+		var vh := float(_player.get_viewport().get_visible_rect().size.y)
+		_probe_cam.fov = rad_to_deg(2.0 * atan(tan(deg_to_rad(cam.fov) * 0.5) * PROBE_PX / vh))
+
+
+func _probe_visible() -> bool:
+	if not _probe_ok:
+		return false
+	var img := _probe_vp.get_texture().get_image()
+	if img == null or img.is_empty():
+		return false
+	return img.get_pixel(PROBE_PX / 2, PROBE_PX / 2).a > 0.5
+
+
+## Truth timeline used for scoring: [usec, under(bool), local_x, hitbox(bool), zone, local_y].
+## Visual truth → one entry per rendered frame (silhouette under the reticle, local_x ≈ -path_x);
+## hitbox truth → one entry per physics tick (reticle ray).
+func _events() -> Array:
+	var ev := []
+	if _truth == "visual":
+		for v in _vis_samples:
+			ev.append([int(v[0]), bool(v[1]), float(v[3]), bool(v[2]), "", 0.0])
+	else:
+		for t in _ticks:
+			ev.append([int(t[0]), bool(t[1]), float(t[3]) if t[1] else -float(t[5]), bool(t[1]), String(t[2]), float(t[4])])
+	return ev
+
+
+func _nearest_event(ev: Array, usec: int) -> int:
+	if ev.is_empty():
+		return -1
+	var lo := 0
+	var hi := ev.size() - 1
+	while lo < hi:
+		var mid := (lo + hi) >> 1
+		if int(ev[mid][0]) < usec:
+			lo = mid + 1
+		else:
+			hi = mid
+	if lo > 0 and absi(int(ev[lo - 1][0]) - usec) < absi(int(ev[lo][0]) - usec):
+		lo -= 1
+	return lo
+
+
+static func _segments(ev: Array, pred: Callable) -> Array:
+	var segs := []
+	var cur := []
+	for e in ev:
+		if pred.call(e):
+			if cur.is_empty():
+				cur = [e[2], e[2]]
+			else:
+				cur[1] = e[2]
+		elif not cur.is_empty():
+			segs.append(cur)
+			cur = []
+	if not cur.is_empty():
+		segs.append(cur)
+	return segs
+
+
 func _analyse_sweep() -> void:
 	var tol := int(float(config["mark_tolerance"]) * 1e6)
-	var under_ticks := 0
-	var detected := {}  # tick index → true
+	var ev := _events()
+	var under_n := 0
+	var first_under := -1
+	for e in ev:
+		if e[1]:
+			under_n += 1
+			if first_under < 0:
+				first_under = int(e[0])
+	var hitbox_ticks := 0
+	for t in _ticks:
+		if t[1]:
+			hitbox_ticks += 1
+	var vis_n := 0
+	var vis_only := 0
+	var hb_only := 0
+	for v in _vis_samples:
+		if v[1]:
+			vis_n += 1
+		if v[1] and not v[2]:
+			vis_only += 1
+		if v[2] and not v[1]:
+			hb_only += 1
+	var detected := {}  # event index → true
 	var correct := 0
 	var false_pos := 0
-	var first_under := -1
+	var false_on_visual := 0
 	var first_correct := -1
-	for i in _ticks.size():
-		if _ticks[i][1]:
-			under_ticks += 1
-			if first_under < 0:
-				first_under = int(_ticks[i][0])
 	var mark_rows := []
 	for m in _marks:
 		var cap := int(m[1])
-		var idx := _nearest_tick(cap if cap >= 0 else int(m[0]))
-		var ok: bool = idx >= 0 and bool(_ticks[idx][1]) and absi(int(_ticks[idx][0]) - (cap if cap >= 0 else int(m[0]))) <= tol
+		var when := cap if cap >= 0 else int(m[0])
+		var idx := _nearest_event(ev, when)
+		var ok: bool = idx >= 0 and bool(ev[idx][1]) and absi(int(ev[idx][0]) - when) <= tol
+		var ti := _nearest_tick(when)
+		var on_hb: bool = ti >= 0 and bool(_ticks[ti][1])
+		var on_vis: bool = not on_hb and _visible_at(when)
 		if ok:
 			correct += 1
 			detected[idx] = true
@@ -209,45 +355,81 @@ func _analyse_sweep() -> void:
 				first_correct = int(m[0])
 		else:
 			false_pos += 1
-		mark_rows.append({ "frame_id": m[2], "capture_usec": cap, "recv_usec": m[0], "correct": ok,
-			"local_x": _ticks[idx][3] if idx >= 0 else 0.0, "local_y": _ticks[idx][4] if idx >= 0 else 0.0,
-			"path_x": _ticks[idx][5] if idx >= 0 else 0.0 })
-	# segments along the body (local x, metres, + = target's left… as seen by the player: right)
-	var det_segs := []
-	var miss_segs := []
-	var cur := []
-	var cur_kind := ""
-	for i in _ticks.size():
-		var kind := ""
-		if _ticks[i][1]:
-			kind = "det" if detected.has(i) else "miss"
-		if kind != cur_kind:
-			if cur_kind == "det":
-				det_segs.append(cur)
-			elif cur_kind == "miss":
-				miss_segs.append(cur)
-			cur = [_ticks[i][3], _ticks[i][3]] if kind != "" else []
-			cur_kind = kind
-		elif kind != "":
-			cur[1] = _ticks[i][3]
-	if cur_kind == "det":
-		det_segs.append(cur)
-	elif cur_kind == "miss":
-		miss_segs.append(cur)
-	_pass_stats["under_ticks"] = under_ticks
-	_pass_stats["ticks"] = _ticks.size()
+			if on_vis:
+				false_on_visual += 1
+		mark_rows.append({ "frame_id": m[2], "capture_usec": cap, "recv_usec": m[0], "correct": ok, "on_visual_only": on_vis, "on_hitbox": on_hb,
+			"local_x": ev[idx][2] if idx >= 0 else 0.0, "local_y": (_ticks[ti][4] if ti >= 0 else 0.0),
+			"path_x": -float(ev[idx][2]) if idx >= 0 else 0.0 })
+	# a detected event = under the reticle and a correct mark within `tol` of it
+	var det_flags := []
+	det_flags.resize(ev.size())
+	det_flags.fill(false)
+	for i in detected:
+		var t0 := int(ev[i][0])
+		var j: int = i
+		while j >= 0 and absi(int(ev[j][0]) - t0) <= tol and ev[j][1]:
+			det_flags[j] = true
+			j -= 1
+		j = i + 1
+		while j < ev.size() and absi(int(ev[j][0]) - t0) <= tol and ev[j][1]:
+			det_flags[j] = true
+			j += 1
+	var det_n := 0
+	var tagged := []
+	for i in ev.size():
+		tagged.append([ev[i][0], ev[i][1], ev[i][2], det_flags[i]])
+		if det_flags[i]:
+			det_n += 1
+	_pass_stats["truth"] = _truth
+	_pass_stats["under_ticks"] = under_n          # truth samples with the target under the reticle
+	_pass_stats["ticks"] = ev.size()
+	_pass_stats["hitbox_ticks"] = hitbox_ticks
+	_pass_stats["hitbox_segments"] = _segments(_events_hitbox(), func(e): return e[1])
+	_pass_stats["visual_probe"] = _probe_ok
+	_pass_stats["visual_samples"] = _vis_samples.size()
+	_pass_stats["visual_samples_visible"] = vis_n
+	_pass_stats["visual_samples_visible_only"] = vis_only
+	_pass_stats["visual_samples_hitbox_only"] = hb_only
+	_pass_stats["visual_segments"] = _vis_segments()
+	_pass_stats["false_positives_on_visual"] = false_on_visual
 	_pass_stats["marks"] = _marks.size()
 	_pass_stats["marks_correct"] = correct
 	_pass_stats["false_positives"] = false_pos
-	_pass_stats["coverage"] = float(detected.size()) / under_ticks if under_ticks > 0 else 0.0
+	_pass_stats["coverage"] = float(det_n) / under_n if under_n > 0 else 0.0
 	_pass_stats["first_mark_latency_ms"] = (first_correct - first_under) / 1000.0 if first_correct >= 0 and first_under >= 0 else null
-	_pass_stats["detected_segments"] = det_segs
-	_pass_stats["missed_segments"] = miss_segs
+	_pass_stats["detected_segments"] = _segments(tagged, func(e): return e[1] and e[3])
+	_pass_stats["missed_segments"] = _segments(tagged, func(e): return e[1] and not e[3])
 	_pass_stats["mark_rows"] = mark_rows
 	_pass_stats["false_positive_path_x"] = []
 	for r in mark_rows:
 		if not r["correct"]:
 			_pass_stats["false_positive_path_x"].append(r["path_x"])
+
+
+func _events_hitbox() -> Array:
+	var ev := []
+	for t in _ticks:
+		ev.append([int(t[0]), bool(t[1]), float(t[3]) if t[1] else -float(t[5])])
+	return ev
+
+
+func _vis_segments() -> Array:
+	var ev := []
+	for v in _vis_samples:
+		ev.append([int(v[0]), bool(v[1]), float(v[3])])
+	return _segments(ev, func(e): return e[1])
+
+
+## Visible-sample nearest in time to `usec` (within one physics tick).
+func _visible_at(usec: int) -> bool:
+	var best_vis := false
+	var best_d := 1 << 40
+	for v in _vis_samples:
+		var d := absi(int(v[0]) - usec)
+		if d < best_d:
+			best_d = d
+			best_vis = bool(v[1])
+	return best_vis and best_d <= 20000
 
 
 func _nearest_tick(usec: int) -> int:
@@ -416,8 +598,9 @@ func build_svg() -> String:
 	var out := PackedStringArray()
 	out.append("")  # <svg …> written at the end, once the height is known
 	out.append('<rect width="100%" height="100%" fill="#14161c"/>')
-	out.append('<text x="14" y="22" fill="#eee" font-size="16">AimLabs — benchmark tir auto : %s · arme %s · cible %s · critère %s</text>' % [
-		_esc(String(result["algo"])), _esc(String(result["weapon"])), _esc(String(result["target"])), String(result["criterion"])])
+	out.append('<text x="14" y="22" fill="#eee" font-size="16">AimLabs — benchmark tir auto : %s · arme %s · cible %s · critère %s · vérité %s</text>' % [
+		_esc(String(result["algo"])), _esc(String(result["weapon"])), _esc(String(result["target"])), String(result["criterion"]),
+		"silhouette visible" if String(result.get("truth", "")) == "visual" else "hitbox"])
 	out.append('<text x="14" y="40" fill="#aaa">%s · résumé : %s</text>' % [_esc(String(result.get("started", ""))), _esc(String(result.get("summary", "")))])
 	out.append('<text x="14" y="62" fill="#ddd">Chaque ligne = une traversée : distance · vitesse · sens (→ gauche→droite, ← droite→gauche, vu par le joueur) · résultat.</text>')
 	out.append('<text x="14" y="78" fill="#ddd">La barre = le trajet de la cible (± %.1f m de part et d\'autre du réticule, échelle en mètres sous chaque groupe) ; le trait blanc = le réticule.</text>' % half)
@@ -425,7 +608,9 @@ func build_svg() -> String:
 	for item in [["#3c3", "vert : la cible était sous le réticule et l\'algo l\'a marquée (détectée)"],
 			["#d33", "rouge : la cible était sous le réticule mais aucune marque (ratée)"],
 			["#fa0", "orange : marque envoyée alors que la cible n\'était pas sous le réticule (fausse marque)"],
-			["#333", "gris : cible hors du réticule, rien à détecter"]]:
+			["#333", "gris : cible hors du réticule, rien à détecter"],
+			["#4af", "bleu (filet au-dessus de la barre) : silhouette visible de la cible sous le réticule (vérité visuelle = ce qu'un algo de vision peut voir)"],
+			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"]]:
 		out.append('<rect x="14" y="%.0f" width="22" height="10" fill="%s"/>' % [ly - 9.0, item[0]])
 		out.append('<text x="42" y="%.0f" fill="#ccc">%s</text>' % [ly, item[1]])
 		ly += 14.0
@@ -474,6 +659,14 @@ func build_svg() -> String:
 		for fx in sw.get("false_positive_path_x", []):
 			var a: float = x0 + (clampf(float(fx), -half, half) + half) / (2.0 * half) * bar_w
 			out.append('<rect x="%.1f" y="%.0f" width="2" height="%.0f" fill="#fa0"/>' % [a, y, row_h])
+		for seg in sw.get("visual_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			out.append('<rect x="%.1f" y="%.0f" width="%.1f" height="2" fill="#4af"/>' % [minf(a, b), y, maxf(absf(b - a), 1.0)])
+		for seg in sw.get("hitbox_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			out.append('<rect x="%.1f" y="%.0f" width="%.1f" height="2" fill="#c6f"/>' % [minf(a, b), y + row_h - 2.0, maxf(absf(b - a), 1.0)])
 		out.append('<line x1="%.0f" y1="%.0f" x2="%.0f" y2="%.0f" stroke="#fff" stroke-width="1"/>' % [x0 + bar_w * 0.5, y, x0 + bar_w * 0.5, y + row_h])
 		var ax0 := x0 + bar_w + 6.0
 		out.append('<text x="%.0f" y="%.0f" fill="#ccc" font-size="12">%s</text>' % [ax0, y + 12.0, "→" if float(sw.get("dir", 1.0)) > 0.0 else "←"])
@@ -507,6 +700,14 @@ class SheetBar extends Control:
 		for fx in sweep.get("false_positive_path_x", []):
 			var a: float = (clampf(float(fx), -half, half) + half) / (2.0 * half) * w
 			draw_rect(Rect2(a, 0, 2, h), Color("#fa0"))
+		for seg in sweep.get("visual_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			draw_rect(Rect2(minf(a, b), 0, maxf(absf(b - a), 1.0), 2), Color("#4af"))
+		for seg in sweep.get("hitbox_segments", []):
+			var a: float = px.call(float(seg[0]))
+			var b: float = px.call(float(seg[1]))
+			draw_rect(Rect2(minf(a, b), h - 2, maxf(absf(b - a), 1.0), 2), Color("#c6f"))
 		draw_line(Vector2(w * 0.5, 0), Vector2(w * 0.5, h), Color.WHITE, 1.0)
 
 
@@ -543,11 +744,13 @@ func show_sheet(visible_sheet: bool = true) -> void:
 	root.add_theme_constant_override("separation", 3)
 	root.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	scroll.add_child(root)
-	root.add_child(_label("Benchmark tir auto : %s · arme %s · cible %s · critère %s" % [result["algo"], result["weapon"], result["target"], result["criterion"]], Color.WHITE, 18))
+	root.add_child(_label("Benchmark tir auto : %s · arme %s · cible %s · critère %s · vérité %s" % [result["algo"], result["weapon"], result["target"], result["criterion"], "silhouette visible" if result.get("truth", "") == "visual" else "hitbox"], Color.WHITE, 18))
 	root.add_child(_label("%s · résumé : %s" % [result.get("started", ""), result.get("summary", "")], Color("#aaa"), 12))
 	root.add_child(_label("Chaque ligne = une traversée : distance · vitesse · sens (→ gauche→droite, ← droite→gauche, vu par le joueur) · résultat. La barre = le trajet de la cible (± %.1f m autour du réticule), le trait blanc = le réticule." % half, Color("#ccc"), 12))
 	for item in [["#3c3", "vert : cible sous le réticule et marquée par l'algo (détectée)"], ["#d33", "rouge : cible sous le réticule mais aucune marque (ratée)"],
-			["#fa0", "orange : marque envoyée alors que la cible n'était pas sous le réticule (fausse marque)"], ["#333", "gris : cible hors du réticule"]]:
+			["#fa0", "orange : marque envoyée alors que la cible n'était pas sous le réticule (fausse marque)"], ["#333", "gris : cible hors du réticule"],
+			["#4af", "bleu (filet au-dessus de la barre) : silhouette visible de la cible sous le réticule (vérité visuelle = ce qu'un algo de vision peut voir)"],
+			["#c6f", "violet (filet sous la barre) : hitbox de la cible sous le réticule (rayon physique ; l'écart avec le bleu = défaut de hitbox)"]]:
 		var row := HBoxContainer.new()
 		var sw := ColorRect.new()
 		sw.color = Color(item[0])
@@ -644,15 +847,12 @@ func _physics_process(delta: float) -> void:
 			if _timer <= 0.0:
 				_begin_pass()
 		"cross":
-			_x += _speed * delta * _dir
-			_target.position = Vector3(_x, 0.0, -_distance)
-			_face_player()
 			var now := Time.get_ticks_usec()
 			var gt := _ground_truth()
 			_ticks.append([now, gt[0], gt[1], gt[2], gt[3], _x])
 			if bool(config["oracle"]):
 				_player.request_fire_from_assist()
-				if gt[0]:
+				if (_visible_at(now) if _truth == "visual" else gt[0]):
 					_marks.append([now, now, 0])
 			if absf(_x) > _half_travel:
 				_end_pass()

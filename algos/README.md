@@ -20,9 +20,15 @@ le segment partagé en cours). La première ligne de la docstring sert de descri
   long). Poids et moteurs sont rangés dans `algos/` quel que soit le dossier de lancement.
   Banc hors jeu : `python algos/yolo_aim.py --bench dossier_png` (ms/frame + taux de détection).
 - `yolo_trigger.py` — tir auto YOLO sans bouger la souris : `mark()` (« cible sous le réticule »,
-  critère du benchmark) dès que le réticule est dans une boîte « person », tir sur la boîte avancée
-  de vitesse × latence (`--no-lead` ; `--margin 0.6` = torse seulement) ; `CAPSLOCK` on/off, `ALT`
-  maintenu ; démarre armé si `AIMLABS_AUTOSTART=1` (posé par le jeu en `--bench-trigger`). Benchmark :
-  `godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py` → `bench_results/*.json`.
+  critère du benchmark) puis tir sur la boîte avancée de vitesse × latence (`--no-lead`) ; `CAPSLOCK`
+  on/off, `ALT` maintenu ; démarre armé si `AIMLABS_AUTOSTART=1` (posé par le jeu en `--bench-trigger`).
+  Deux critères : `--mode box` (le réticule est dans la boîte « person », `--margin 0.6` = bande
+  centrale) et `--mode seg` (le pixel du réticule est dans le **masque de segmentation** de la
+  personne, modèle `yolo11n-seg.pt`, moteur TensorRT à deux sorties : exporter avec
+  `python algos/yolo_trigger.py --export --mode seg`, jeu fermé). Mesuré sur RTX 3080 à la poitrine :
+  box 38–44 % de marques fausses (la boîte englobe les bras en A-pose), seg 28–32 % et vitesse limite
+  ×2 ; `--margin 0.5` supprime les fausses marques mais rate la tête et triple la latence. Benchmark :
+  `godot --path game -- --map=range --bench-trigger --algo=yolo_trigger.py "--algo-args=--mode seg"`
+  → `bench_results/*.json` + fiche SVG. Variables d'env équivalentes : `AIMLABS_TRIGGER_MODE`, `AIMLABS_TRIGGER_MARGIN`.
 
 Pour pointer le jeu sur un autre dossier : `--algos=/chemin` (ou le bouton « Dossier » du menu).

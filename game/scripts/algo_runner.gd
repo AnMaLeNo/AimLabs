@@ -93,12 +93,14 @@ func current_name() -> String:
 	return current_path.get_file()
 
 
-func start(path: String) -> bool:
+func start(path: String, extra_args: PackedStringArray = []) -> bool:
 	stop()
 	current_path = path
 	log_lines.clear()
-	_log("$ %s %s" % [python_cmd, path])
-	var info := OS.execute_with_pipe(python_cmd, [path], false)
+	var argv := PackedStringArray([path])
+	argv.append_array(extra_args)
+	_log("$ %s %s" % [python_cmd, " ".join(argv)])
+	var info := OS.execute_with_pipe(python_cmd, argv, false)
 	if info.is_empty():
 		_log("impossible de lancer %s (python introuvable ?)" % python_cmd)
 		pid = -1
