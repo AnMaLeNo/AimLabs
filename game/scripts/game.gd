@@ -101,6 +101,7 @@ func _ready() -> void:
 		_args["--bench-trigger"] = true
 		_args["--bench-sniper"] = true
 	if _args.has("--bench-trigger"):
+		runner.echo_console = true
 		OS.set_environment("AIMLABS_AUTOSTART", "1")  # algos start armed (no CapsLock needed)
 	if _args.has("--algo"):
 		var e: Dictionary = runner.find_entry(String(_args["--algo"]))

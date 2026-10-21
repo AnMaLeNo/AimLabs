@@ -173,7 +173,12 @@ func _drain_pipes() -> void:
 			_log(line)
 
 
+var echo_console := false  # CLI benchmarks: mirror the algo's output to the game's stdout
+
+
 func _log(text: String) -> void:
+	if echo_console:
+		print("algo | ", text)
 	log_lines.append(text)
 	if log_lines.size() > MAX_LOG_LINES:
 		log_lines = log_lines.slice(log_lines.size() - MAX_LOG_LINES)

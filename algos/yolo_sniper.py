@@ -177,8 +177,15 @@ def main(argv) -> int:
             in_band = abs(cx - mx) <= hw and abs(cy - my) <= hh
             sure = in_band and b[4] >= args.conf and len(track.hist) >= args.track
             if sure and seg is not None:
-                # le pixel du réticule au moment du tir correspond au pixel (cx - dx, cy - dy) de la frame vue
-                sure = seg.mask_at(bi, cx - dx, cy - dy) >= 0.5
+                # le pixel du réticule au moment du tir correspond au pixel (cx - dx, cy - dy) de la frame vue ;
+                # il doit être dans la bande centrale (--band) de la largeur du MASQUE sur cette ligne (pas de la
+                # boîte : à hauteur de tête la boîte fait tout le corps)
+                ext = seg.mask_extent(bi, cy - dy, b[0], b[2])
+                if ext is None:
+                    sure = False
+                else:
+                    ex_c, ex_hw = (ext[0] + ext[1]) / 2, (ext[1] - ext[0]) / 2 * args.band
+                    sure = abs((cx - dx) - ex_c) <= max(ex_hw, 1.0)
             if sure:
                 if c.fire(frame_id=f.id):
                     n_fire += 1

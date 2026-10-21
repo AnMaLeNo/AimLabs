@@ -198,6 +198,34 @@ class Detector:
             return float(self._masks[raw_i, py, px])
         return 1.0
 
+    def mask_extent(self, box_index: int, y: float, x_lo: float, x_hi: float) -> Optional[Tuple[float, float]]:
+        """Étendue horizontale [x1, x2] (pixels de la frame) du masque de la boîte sur la ligne `y`,
+        limitée à [x_lo, x_hi] ; None sans segmentation ou si la ligne est vide."""
+        if not self.seg or box_index >= len(self._coefs):
+            return None
+        raw_i = self._coefs[box_index]
+        fh, fw = self._frame_hw
+        if self._protos is not None and self._raw_coefs is not None:
+            mh, mw = self._protos.shape[1], self._protos.shape[2]
+            py = min(max(int(y * mh / fh), 0), mh - 1)
+            row = self.torch.sigmoid(self._raw_coefs[raw_i] @ self._protos[:, py, :])  # (mw,)
+            on = (row >= 0.5).nonzero().flatten()
+            if on.numel() == 0:
+                return None
+            lo_c, hi_c = max(int(x_lo * mw / fw), 0), min(int(x_hi * mw / fw), mw - 1)
+            on = on[(on >= lo_c) & (on <= hi_c)]
+            if on.numel() == 0:
+                return None
+            return float(on.min()) * fw / mw, (float(on.max()) + 1.0) * fw / mw
+        if self._masks is not None and raw_i < self._masks.shape[0]:
+            mh, mw = self._masks.shape[1], self._masks.shape[2]
+            py = min(max(int(y * mh / fh), 0), mh - 1)
+            on = (self._masks[raw_i, py, :] >= 0.5).nonzero().flatten()
+            if on.numel() == 0:
+                return None
+            return float(on.min()) * fw / mw, (float(on.max()) + 1.0) * fw / mw
+        return None
+
 
 def pick_target(boxes, cx: float, cy: float, head: bool) -> Optional[Tuple[float, float, float, float]]:
     """(aim_x, aim_y, half_w, half_h) de la boîte dont le point visé est le plus proche du réticule."""
