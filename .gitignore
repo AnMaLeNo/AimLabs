@@ -22,3 +22,4 @@ __pycache__/
 # Résultats de benchmark (TriggerBench)
 bench_results/
 sdk/rust/aimlabs/target/
+algos/rust/sniper-rs/target/
