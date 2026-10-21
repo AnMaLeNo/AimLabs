@@ -48,7 +48,7 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
     ap.add_argument("--conf", type=float, default=0.5, help="confiance minimale de la boîte pour tirer")
     ap.add_argument("--band", type=float, default=0.5, help="bande centrale de la boîte (fraction de la largeur) où le tir est sûr")
     ap.add_argument("--vband", type=float, default=0.9, help="idem en hauteur")
-    ap.add_argument("--track", type=int, default=3, help="frames de suivi minimales avant de tirer")
+    ap.add_argument("--track", type=int, default=2, help="frames de suivi minimales avant de tirer")
     ap.add_argument("--lead-scale", type=float, default=1.0, help="facteur sur l'avance prédite (0 = pas d'anticipation)")
     ap.add_argument("--cooldown", type=float, default=1.0, help="s sans tir après un tir")
     ap.add_argument("--no-half", action="store_true")
@@ -190,7 +190,7 @@ def main(argv) -> int:
             if vel is not None and args.lead_scale > 0.0:
                 vx, vy, res = vel
                 bw = b[2] - b[0]
-                if res < 0.15 * bw + 2.0:  # mouvement cohérent (sinon : pas d'anticipation)
+                if res < 0.3 * bw + 2.0:  # mouvement cohérent (jitter YOLO ≈ 20 % de la largeur ; sinon : pas d'anticipation)
                     dx, dy = vx * latency * args.lead_scale, vy * latency * args.lead_scale
             px1, py1, px2, py2 = b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy
             mx, my = (px1 + px2) / 2, (py1 + py2) / 2
