@@ -238,7 +238,13 @@ func _on_frame_drawn() -> void:
 		_vis_samples.append([Time.get_ticks_usec(), vis, bool(_ground_truth()[0]), -_x])
 
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	if running and _phase == "cross":
+		# the target moves per RENDERED frame (not per 60 Hz physics tick): at 30 m/s a tick is a
+		# 0.5 m jump, the whole silhouette — the limit would measure the tick rate, not the algo
+		_x += _speed * delta * _dir
+		_target.position = Vector3(_x, 0.0, -_distance)
+		_face_player()
 	if running and _probe_ok:
 		var cam := _player.camera
 		_probe_cam.global_transform = cam.global_transform
@@ -257,59 +263,91 @@ func _probe_visible() -> bool:
 	return img.get_pixel(PROBE_PX / 2, PROBE_PX / 2).a > 0.5
 
 
-## Truth used for scoring at tick i: the silhouette sample nearest in time (≤ 20 ms) when the
-## visual truth is active, else the hitbox ray of that tick.
-func _under_at(i: int) -> bool:
-	if _truth != "visual":
-		return bool(_ticks[i][1])
-	var usec := int(_ticks[i][0])
-	var best_d := 1 << 40
-	var best_vis := bool(_ticks[i][1])
-	for v in _vis_samples:
-		var d := absi(int(v[0]) - usec)
-		if d < best_d:
-			best_d = d
-			best_vis = bool(v[1])
-	return best_vis if best_d <= 20000 else bool(_ticks[i][1])
+## Truth timeline used for scoring: [usec, under(bool), local_x, hitbox(bool), zone, local_y].
+## Visual truth → one entry per rendered frame (silhouette under the reticle, local_x ≈ -path_x);
+## hitbox truth → one entry per physics tick (reticle ray).
+func _events() -> Array:
+	var ev := []
+	if _truth == "visual":
+		for v in _vis_samples:
+			ev.append([int(v[0]), bool(v[1]), float(v[3]), bool(v[2]), "", 0.0])
+	else:
+		for t in _ticks:
+			ev.append([int(t[0]), bool(t[1]), float(t[3]) if t[1] else -float(t[5]), bool(t[1]), String(t[2]), float(t[4])])
+	return ev
+
+
+func _nearest_event(ev: Array, usec: int) -> int:
+	if ev.is_empty():
+		return -1
+	var lo := 0
+	var hi := ev.size() - 1
+	while lo < hi:
+		var mid := (lo + hi) >> 1
+		if int(ev[mid][0]) < usec:
+			lo = mid + 1
+		else:
+			hi = mid
+	if lo > 0 and absi(int(ev[lo - 1][0]) - usec) < absi(int(ev[lo][0]) - usec):
+		lo -= 1
+	return lo
+
+
+static func _segments(ev: Array, pred: Callable) -> Array:
+	var segs := []
+	var cur := []
+	for e in ev:
+		if pred.call(e):
+			if cur.is_empty():
+				cur = [e[2], e[2]]
+			else:
+				cur[1] = e[2]
+		elif not cur.is_empty():
+			segs.append(cur)
+			cur = []
+	if not cur.is_empty():
+		segs.append(cur)
+	return segs
 
 
 func _analyse_sweep() -> void:
 	var tol := int(float(config["mark_tolerance"]) * 1e6)
-	var under_ticks := 0
+	var ev := _events()
+	var under_n := 0
+	var first_under := -1
+	for e in ev:
+		if e[1]:
+			under_n += 1
+			if first_under < 0:
+				first_under = int(e[0])
 	var hitbox_ticks := 0
-	var under := []  # per tick, the truth used for scoring
-	for i in _ticks.size():
-		under.append(_under_at(i))
-		if _ticks[i][1]:
+	for t in _ticks:
+		if t[1]:
 			hitbox_ticks += 1
-	var vis_ticks := 0
+	var vis_n := 0
 	var vis_only := 0
 	var hb_only := 0
 	for v in _vis_samples:
 		if v[1]:
-			vis_ticks += 1
+			vis_n += 1
 		if v[1] and not v[2]:
 			vis_only += 1
 		if v[2] and not v[1]:
 			hb_only += 1
-	var detected := {}  # tick index → true
+	var detected := {}  # event index → true
 	var correct := 0
 	var false_pos := 0
 	var false_on_visual := 0
-	var first_under := -1
 	var first_correct := -1
-	for i in _ticks.size():
-		if under[i]:
-			under_ticks += 1
-			if first_under < 0:
-				first_under = int(_ticks[i][0])
 	var mark_rows := []
 	for m in _marks:
 		var cap := int(m[1])
-		var idx := _nearest_tick(cap if cap >= 0 else int(m[0]))
-		var ok: bool = idx >= 0 and bool(under[idx]) and absi(int(_ticks[idx][0]) - (cap if cap >= 0 else int(m[0]))) <= tol
-		var on_vis: bool = idx >= 0 and not bool(_ticks[idx][1]) and _visible_at(cap if cap >= 0 else int(m[0]))
-		var on_hb: bool = idx >= 0 and bool(_ticks[idx][1])
+		var when := cap if cap >= 0 else int(m[0])
+		var idx := _nearest_event(ev, when)
+		var ok: bool = idx >= 0 and bool(ev[idx][1]) and absi(int(ev[idx][0]) - when) <= tol
+		var ti := _nearest_tick(when)
+		var on_hb: bool = ti >= 0 and bool(_ticks[ti][1])
+		var on_vis: bool = not on_hb and _visible_at(when)
 		if ok:
 			correct += 1
 			detected[idx] = true
@@ -320,80 +358,66 @@ func _analyse_sweep() -> void:
 			if on_vis:
 				false_on_visual += 1
 		mark_rows.append({ "frame_id": m[2], "capture_usec": cap, "recv_usec": m[0], "correct": ok, "on_visual_only": on_vis, "on_hitbox": on_hb,
-			"local_x": _ticks[idx][3] if idx >= 0 else 0.0, "local_y": _ticks[idx][4] if idx >= 0 else 0.0,
-			"path_x": _ticks[idx][5] if idx >= 0 else 0.0 })
-	# segments along the body (local x, metres, + = target's left… as seen by the player: right)
-	var det_segs := []
-	var miss_segs := []
-	var cur := []
-	var cur_kind := ""
-	for i in _ticks.size():
-		var kind := ""
-		if under[i]:
-			kind = "det" if detected.has(i) else "miss"
-		if kind != cur_kind:
-			if cur_kind == "det":
-				det_segs.append(cur)
-			elif cur_kind == "miss":
-				miss_segs.append(cur)
-			cur = [_ticks[i][3], _ticks[i][3]] if kind != "" else []
-			cur_kind = kind
-		elif kind != "":
-			cur[1] = _ticks[i][3]
-	if cur_kind == "det":
-		det_segs.append(cur)
-	elif cur_kind == "miss":
-		miss_segs.append(cur)
-	var vis_segs := []
-	cur = []
-	for v in _vis_samples:
-		if v[1]:
-			if cur.is_empty():
-				cur = [v[3], v[3]]
-			else:
-				cur[1] = v[3]
-		elif not cur.is_empty():
-			vis_segs.append(cur)
-			cur = []
-	if not cur.is_empty():
-		vis_segs.append(cur)
-	var hb_segs := []
-	cur = []
-	for i in _ticks.size():
-		if _ticks[i][1]:
-			if cur.is_empty():
-				cur = [_ticks[i][3], _ticks[i][3]]
-			else:
-				cur[1] = _ticks[i][3]
-		elif not cur.is_empty():
-			hb_segs.append(cur)
-			cur = []
-	if not cur.is_empty():
-		hb_segs.append(cur)
+			"local_x": ev[idx][2] if idx >= 0 else 0.0, "local_y": (_ticks[ti][4] if ti >= 0 else 0.0),
+			"path_x": -float(ev[idx][2]) if idx >= 0 else 0.0 })
+	# a detected event = under the reticle and a correct mark within `tol` of it
+	var det_flags := []
+	det_flags.resize(ev.size())
+	det_flags.fill(false)
+	for i in detected:
+		var t0 := int(ev[i][0])
+		var j: int = i
+		while j >= 0 and absi(int(ev[j][0]) - t0) <= tol and ev[j][1]:
+			det_flags[j] = true
+			j -= 1
+		j = i + 1
+		while j < ev.size() and absi(int(ev[j][0]) - t0) <= tol and ev[j][1]:
+			det_flags[j] = true
+			j += 1
+	var det_n := 0
+	var tagged := []
+	for i in ev.size():
+		tagged.append([ev[i][0], ev[i][1], ev[i][2], det_flags[i]])
+		if det_flags[i]:
+			det_n += 1
 	_pass_stats["truth"] = _truth
+	_pass_stats["under_ticks"] = under_n          # truth samples with the target under the reticle
+	_pass_stats["ticks"] = ev.size()
 	_pass_stats["hitbox_ticks"] = hitbox_ticks
-	_pass_stats["hitbox_segments"] = hb_segs
+	_pass_stats["hitbox_segments"] = _segments(_events_hitbox(), func(e): return e[1])
 	_pass_stats["visual_probe"] = _probe_ok
 	_pass_stats["visual_samples"] = _vis_samples.size()
-	_pass_stats["visual_samples_visible"] = vis_ticks
+	_pass_stats["visual_samples_visible"] = vis_n
 	_pass_stats["visual_samples_visible_only"] = vis_only
 	_pass_stats["visual_samples_hitbox_only"] = hb_only
-	_pass_stats["visual_segments"] = vis_segs
+	_pass_stats["visual_segments"] = _vis_segments()
 	_pass_stats["false_positives_on_visual"] = false_on_visual
-	_pass_stats["under_ticks"] = under_ticks
-	_pass_stats["ticks"] = _ticks.size()
 	_pass_stats["marks"] = _marks.size()
 	_pass_stats["marks_correct"] = correct
 	_pass_stats["false_positives"] = false_pos
-	_pass_stats["coverage"] = float(detected.size()) / under_ticks if under_ticks > 0 else 0.0
+	_pass_stats["coverage"] = float(det_n) / under_n if under_n > 0 else 0.0
 	_pass_stats["first_mark_latency_ms"] = (first_correct - first_under) / 1000.0 if first_correct >= 0 and first_under >= 0 else null
-	_pass_stats["detected_segments"] = det_segs
-	_pass_stats["missed_segments"] = miss_segs
+	_pass_stats["detected_segments"] = _segments(tagged, func(e): return e[1] and e[3])
+	_pass_stats["missed_segments"] = _segments(tagged, func(e): return e[1] and not e[3])
 	_pass_stats["mark_rows"] = mark_rows
 	_pass_stats["false_positive_path_x"] = []
 	for r in mark_rows:
 		if not r["correct"]:
 			_pass_stats["false_positive_path_x"].append(r["path_x"])
+
+
+func _events_hitbox() -> Array:
+	var ev := []
+	for t in _ticks:
+		ev.append([int(t[0]), bool(t[1]), float(t[3]) if t[1] else -float(t[5])])
+	return ev
+
+
+func _vis_segments() -> Array:
+	var ev := []
+	for v in _vis_samples:
+		ev.append([int(v[0]), bool(v[1]), float(v[3])])
+	return _segments(ev, func(e): return e[1])
 
 
 ## Visible-sample nearest in time to `usec` (within one physics tick).
@@ -823,9 +847,6 @@ func _physics_process(delta: float) -> void:
 			if _timer <= 0.0:
 				_begin_pass()
 		"cross":
-			_x += _speed * delta * _dir
-			_target.position = Vector3(_x, 0.0, -_distance)
-			_face_player()
 			var now := Time.get_ticks_usec()
 			var gt := _ground_truth()
 			_ticks.append([now, gt[0], gt[1], gt[2], gt[3], _x])
