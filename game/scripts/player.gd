@@ -50,6 +50,8 @@ var mouse_captured := false
 ## Pixels of look input received this frame, per source (for the HUD / bridge).
 var look_delta_this_frame := { LookSource.REAL: Vector2.ZERO, LookSource.ASSIST: Vector2.ZERO }
 var fire_requested_by_assist := false
+var assist_fire_lag_ms := 0.0  ## average delay between the assist FIRE command being applied and the shot being fired (EMA)
+var _assist_fire_request_usec := 0
 
 var _flash_timer := 0.0
 var _fire_held_last := false
@@ -151,8 +153,12 @@ func _process(delta: float) -> void:
 	var human_fire := fire_held if viewmodel.automatic else (fire_held and not _fire_held_last)
 	_fire_held_last = fire_held
 	var wants_fire := human_fire or fire_requested_by_assist
+	var assist_fire := fire_requested_by_assist
 	fire_requested_by_assist = false
 	if wants_fire and fire_cooldown <= 0.0:
+		if assist_fire:
+			var lag := float(Time.get_ticks_usec() - _assist_fire_request_usec) / 1000.0
+			assist_fire_lag_ms = lag if assist_fire_lag_ms <= 0.0 else assist_fire_lag_ms * 0.8 + lag * 0.2
 		_fire()
 		fire_cooldown = viewmodel.fire_interval() if viewmodel.weapon_slug != "" else 60.0 / rounds_per_minute
 
@@ -170,6 +176,8 @@ func _process(delta: float) -> void:
 
 ## Request one shot on behalf of an aim-assist program (consumed next frame).
 func request_fire_from_assist() -> void:
+	if not fire_requested_by_assist:
+		_assist_fire_request_usec = Time.get_ticks_usec()
 	fire_requested_by_assist = true
 
 

@@ -28,6 +28,8 @@ var _bench_row: HBoxContainer
 var _bench_btn: Button
 var _bench_label: Label
 var _bridge_label: Label
+var _info_btn: OptionButton
+var _info_checks := {}
 var _log_dirty := true
 
 
@@ -126,6 +128,7 @@ func _build() -> void:
 
 	var bottom := HBoxContainer.new()
 	_build_map_rows(root)
+	_build_info_row(root)
 	root.add_child(bottom)
 	var agent_label := Label.new()
 	agent_label.text = "Personnage :"
@@ -177,6 +180,37 @@ func _build() -> void:
 	resume.text = "Reprendre"
 	resume.pressed.connect(func() -> void: game.player.set_mouse_captured(true))
 	bottom.add_child(resume)
+
+
+## Information profile: "real" = the game gives out nothing but the keys; "training" = everything, each source switchable.
+func _build_info_row(root: VBoxContainer) -> void:
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 8)
+	root.add_child(row)
+	var label := Label.new()
+	label.text = "Informations :"
+	row.add_child(label)
+	_info_btn = OptionButton.new()
+	_info_btn.add_item("Réel (aucune information)")
+	_info_btn.add_item("Entraînement (personnalisable)")
+	_info_btn.item_selected.connect(func(i: int) -> void: game.set_info_profile("real" if i == 0 else "training"))
+	row.add_child(_info_btn)
+	for key: String in game.INFO_KEYS:
+		var cb := CheckBox.new()
+		cb.text = String(game.INFO_LABELS[key])
+		cb.toggled.connect(func(on: bool) -> void: game.set_info_toggle(key, on))
+		row.add_child(cb)
+		_info_checks[key] = cb
+	game.info_changed.connect(_refresh_info)
+	_refresh_info()
+
+
+func _refresh_info() -> void:
+	_info_btn.select(0 if game.info_profile == "real" else 1)
+	for key: String in _info_checks:
+		var cb: CheckBox = _info_checks[key]
+		cb.set_pressed_no_signal(game.info_profile == "training" and bool(game.info_toggles[key]))
+		cb.disabled = game.info_profile == "real"
 
 
 const PATTERN_LABELS := {"none": "Immobile", "line": "Gauche-droite", "square": "Carré", "circle": "Cercle"}

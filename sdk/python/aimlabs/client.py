@@ -27,6 +27,22 @@ class Frame:
     fov: float
     render_frame: int
     image: np.ndarray  # (height, width, 4) uint8 RGBA, own copy
+    t_local_us: int = 0  # local clock (perf_counter, µs) when the client got the frame
+
+    @property
+    def time_us(self) -> int:
+        """When the image was captured, on a clock consistent from one frame to the next: the game's capture time
+        when the game provides it (information profile « training »), else the local arrival time (« real »)."""
+        return self.capture_usec or self.t_local_us
+
+
+def frame_latency_s(state: dict, frame: "Frame", default_s: float = 0.008) -> float:
+    """Seconds from the capture of `frame` to a command applied now. With the game's information: (state.time −
+    capture) + one frame; without it (profile « real »: no clock, no fps): time since the client got the frame
+    plus `default_s` (readback / network + command application, to be tuned for the setup)."""
+    if frame.capture_usec and state.get("time_usec"):
+        return max(state["time_usec"] - frame.capture_usec, 0) / 1e6 + 1.0 / max(state.get("fps", 0.0), 1.0)
+    return max(time.perf_counter_ns() // 1000 - frame.t_local_us, 0) / 1e6 + default_s
 
 
 def _bits_to_names(words: tuple) -> FrozenSet[str]:
@@ -137,6 +153,11 @@ class AimClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
+    def beat(self) -> None:
+        """Tell the game a client is alive (frames do it implicitly; call this when there are none,
+        e.g. the relay of the ``remote`` mode)."""
+        self._beat()
+
     def _beat(self) -> None:
         self._heartbeat += 1
         self._u64.pack_into(self._buf, P.OFF_CLIENT_HEARTBEAT, self._heartbeat)
@@ -162,6 +183,8 @@ class AimClient:
             "vision": bool(flags & P.MODE_VISION),
             "move": bool(flags & P.MODE_MOVE),
             "fire": bool(flags & P.MODE_FIRE),
+            "info_state": bool(flags & P.MODE_INFO_STATE),  # False = state() only carries the keys
+            "info_meta": bool(flags & P.MODE_INFO_META),    # False = frames carry no capture time / angles
             "vision_size": (vw, vh),  # (0, 0) = native viewport resolution
         }
 
@@ -188,7 +211,7 @@ class AimClient:
             if seq2 != seq1:
                 continue
             self._beat()
-            return Frame(fid, w, h, cap, yaw, pitch, fov, rframe, pixels.reshape(h, stride // 4, 4)[:, :w, :])
+            return Frame(fid, w, h, cap, yaw, pitch, fov, rframe, pixels.reshape(h, stride // 4, 4)[:, :w, :], time.perf_counter_ns() // 1000)
         return None
 
     def frame(self, timeout: float = 1.0) -> Optional[Frame]:

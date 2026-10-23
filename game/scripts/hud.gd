@@ -19,6 +19,8 @@ var _frame_times: Array[float] = []
 var bridge_text := ""
 ## Progress of the trigger benchmark (TriggerBench), empty when idle.
 var bench_text := ""
+## Information profile: false hides every text the HUD would give out (stats, bridge, benchmark, hints).
+var text_enabled := true
 
 
 func _ready() -> void:
@@ -40,6 +42,7 @@ func _process(delta: float) -> void:
 	if _hitmarker_time > 0.0:
 		_hitmarker_time -= delta
 	crosshair.queue_redraw()
+	stats_label.visible = text_enabled
 	var accuracy := 100.0 * hits / shots if shots > 0 else 0.0
 	stats_label.text = "%d FPS  (%.1f ms)\nShots %d  Hits %d  (%.0f%%)\nHeadshots %d  Kills %d" % [
 		Engine.get_frames_per_second(), avg * 1000.0, shots, hits, accuracy, headshots, kills]
@@ -49,11 +52,17 @@ func _process(delta: float) -> void:
 		stats_label.text += "\n" + bench_text
 
 
+func set_text_enabled(enabled: bool) -> void:
+	text_enabled = enabled
+	stats_label.visible = enabled
+	set_mouse_captured(not overlay.visible)
+
+
 func set_mouse_captured(captured: bool) -> void:
 	overlay.visible = not captured
-	hint_label.visible = captured
+	hint_label.visible = captured and text_enabled
 	if not captured:
-		overlay_label.text = "WASD move · Shift sprint · Space jump · Left click shoot · R reload · F inspect · T reset targets · Esc menu (character, weapon, algos)"
+		overlay_label.text = "" if not text_enabled else "WASD move · Shift sprint · Space jump · Left click shoot · R reload · F inspect · T reset targets · Esc menu (character, weapon, algos)"
 
 
 func on_shot_fired(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> void:

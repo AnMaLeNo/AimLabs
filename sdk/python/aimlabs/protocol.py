@@ -9,6 +9,8 @@ PIXEL_FORMAT_RGBA8 = 1
 MODE_VISION = 1 << 0
 MODE_MOVE = 1 << 1
 MODE_FIRE = 1 << 2
+MODE_INFO_STATE = 1 << 3   # State block carries game info (else only the keys)
+MODE_INFO_META = 1 << 4    # frame headers carry capture time / view angles / render frame
 
 CMD_MOVE = 1
 CMD_FIRE = 2

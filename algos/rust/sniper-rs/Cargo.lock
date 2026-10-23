@@ -162,6 +162,7 @@ name = "sniper-rs"
 version = "0.1.0"
 dependencies = [
  "aimlabs",
+ "libloading",
  "ndarray",
  "ort",
 ]
