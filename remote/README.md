@@ -60,7 +60,58 @@ rattaché à une image connue du jeu. Pour lancer un algo **existant sans le mod
 `python remote/poc/run_remote_algo.py --connect listen:7777 algos/yolo_sniper.py` (remplace `AimClient` par
 `aimlabs.remote.RemoteClient`).
 
+## Mode debug de B : `sniper_b.py --view`
+
+Une fenêtre sur la machine B montre **ce que l'IA reçoit, détecte et décide** : image reçue (agrandie ×3, pixels réels), toutes
+les boîtes (les gardées par B, plus les candidats faibles en gris), masques de segmentation, cible choisie, zone de tir, ligne
+du masque lue au niveau du réticule, vitesse mesurée et position prédite au moment du tir, suivi, état de la décision
+(armé / verrouillé / refroidissement / tir programmé dans X ms), latences (inférence, réception→commande, écart entre images,
+images perdues), raisons pour lesquelles B ne tire pas, et les 4 dernières images qui ont décidé un tir (touches `1`–`4` pour
+les revoir en grand, `0` pour le direct ; `espace` pause, `s` capture, `m` masques, `c` candidats, `i` lissage, `q` quitter).
+
+```
+AIMLABS_AUTOSTART=1 venv/bin/python remote/poc/sniper_b.py --connect listen:7777 --model algos/yolo11n-seg_256.mlpackage --view
+```
+
+Options : `--view-fps` (30), `--view-scale` (3), `--view-headless` + `--view-snap DIR` (PNG sans écran, pour tester à distance),
+`--view-log fichier.csv` (télémétrie de chaque image), `--view-linger`. Désarmé, la vue montre quand même l'image et les
+détections (à la cadence de la fenêtre seulement). Sans `--view`, aucun code de debug ne tourne dans la boucle de B.
+
+**Pourquoi il ne ralentit pas B** (`sniper_view.py`) : la fenêtre est un *processus séparé* en priorité basse (macOS : QoS
+« utility », donc cœurs d'efficacité) ; B ne fait que copier des octets en mémoire partagée, *après* avoir envoyé sa commande
+(≈ 7 µs par image : un enregistrement de télémétrie de 64 octets, et un instantané complet — image BGR d'origine, sorties du
+réseau — seulement quand la fenêtre en réclame un, ≤ 30/s, protocole demande/accusé : B n'écrit jamais pendant que la fenêtre
+lit). L'image décisive d'un tir est conservée à part. Si la fenêtre se ferme ou meurt, B continue ; si B est tué, la fenêtre
+s'arrête et supprime la mémoire partagée. Le rendu coûte 1,6 ms sur le M5 (panneau de droite recalculé à 8 Hz seulement).
+
+**Coût mesuré** (M5, même session de jeu rejouée, 4 tours entrelacés de 45 s ; `ab_bench.py`) : réception→commande de B
+
+| Configuration | réception→commande | inférence | CPU de la vue |
+|---|---|---|---|
+| ancien `sniper_b` (avant ce travail) | 0,972 ms | 0,931 ms | – |
+| `sniper_b` courant, sans `--view` | 0,570–0,585 ms | 0,525–0,540 ms | – |
+| `--view`, sans fenêtre (`--view-headless`) | 0,572 ms | 0,531 ms | 5 % d'un cœur |
+| `--view`, fenêtre réelle 30 images/s | 0,589–0,600 ms | 0,538 ms | 25 % |
+| `--view`, fenêtre réelle 15 images/s | 0,591 ms | 0,530 ms | 17 % |
+
+La vue elle-même ne coûte rien mesurable (7 µs sur le thread de décision ; sans fenêtre, aucune différence avec le mode normal).
+Une **fenêtre affichée** ajoute ≈ 0,01–0,02 ms (2–3 % de B, ≈ 0,2 % de la chaîne de ≈ 7 ms) quels que soient la cadence et
+l'agrandissement : c'est la présence d'une fenêtre à l'écran (macOS), pas le rendu. En direct (jeu réel, 30 traversées) le taux de
+touches ne bouge pas : 36 m/s, 27 et 30/30 sans vue, 30 et 30/30 avec ; 48 m/s, 23 et 30/30 sans vue, 29 et 29/30 avec (bruit ±3).
+`--view-fps 15` allège encore la charge ; ne pas laisser la fenêtre au premier plan d'une machine déjà chargée.
+
+Le gain « hors debug » vient d'une correction : `Image.fromarray` de la vue RGB renversée de `cv2.imdecode(...)[:, :, ::-1]`
+coûtait 496 µs par image ; `Detector` convertit maintenant l'image BGR d'origine (34 µs, pixels identiques) : B passe de
+0,97 à 0,58 ms.
+
 ## Outils de mesure (`poc/`)
+
+* `replay_agent.py` : rejoue des images enregistrées par `agent_a.py --record` vers B (même protocole, même cadence), sans jeu
+  ni capture : mêmes entrées pour comparer deux réglages de B. `recinfo.py` résume un enregistrement.
+* `ab_bench.py` : banc A/B de B sur le Mac (configurations entrelacées sur plusieurs tours, statistiques de B, CPU par processus).
+* `live_bench.py` : session de jeu complète (B sur le Mac, jeu, agent, nettoyage) : touches sur N traversées + statistiques de B, pour
+  des configurations de `ab_bench.py` (ex. avec / sans `--view`).
+* `sync_mac.sh` : copie `remote/`, `sdk/python` et `algos/*.py` vers le Mac.
 
 * `latency_probe.py` : renvoie un `mark` par image, sans inférence → coût pur du transport.
 * `net_echo.py` : RTT réseau seul TCP/UDP selon la taille des messages (sans capture ni inférence).

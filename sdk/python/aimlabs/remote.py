@@ -113,6 +113,8 @@ class RemoteClient:
         self._cond = threading.Condition()
         self._closed = False
         self._pending = None            # (id, capture_usec, W, H, x0, y0, rgb crop)
+        self._pending_x = None          # (crop BGR d'origine ou None, décodage JPEG en ms, octets reçus) de _pending
+        self.last_x = (None, 0.0, 0)    # idem pour la dernière image rendue par crop() : sert au mode debug de B
         self.last_frame_id = 0
         self._canvas = None
         self._state = None
@@ -138,14 +140,19 @@ class RemoteClient:
         if typ == T_FRAME:
             fid, cap, w, h, x0, y0, cw, ch, codec = FRAME_HDR.unpack_from(p, 0)
             data = memoryview(p)[FRAME_HDR.size:]
+            bgr, dec_ms = None, 0.0
             if codec == CODEC_JPEG:
                 import cv2
-                crop = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)[:, :, ::-1]
+                t_dec = time.perf_counter()
+                bgr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                dec_ms = (time.perf_counter() - t_dec) * 1e3
+                crop = bgr[:, :, ::-1]
             else:
                 crop = np.frombuffer(data, np.uint8).reshape(ch, cw, 3)
             with self._cond:
                 if self._pending is None or fid > self._pending[0]:
                     self._pending = (fid, cap, w, h, x0, y0, crop)
+                    self._pending_x = (bgr, dec_ms, len(data))
                     self.rx_time = time.monotonic()
                     self._cond.notify_all()
         elif typ == T_STATE:
@@ -247,6 +254,7 @@ class RemoteClient:
                 return None
             fid, cap, w, h, x0, y0, crop = self._pending
             rx = self.rx_time
+            self.last_x = self._pending_x
         self.last_frame_id = fid
         return fid, cap, rx, crop, (x0, y0), (w, h)
 
