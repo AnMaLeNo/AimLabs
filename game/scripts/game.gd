@@ -6,6 +6,10 @@ extends Node
 ##                         verify the hit is registered, quit with exit code 0/1
 ##   --bridge=off          do not start the AimBridge (default: on)
 ##   --mode=<name>         game mode, see MODES (default: full)
+##   --info=<profile>      information profile: real (the game gives out nothing but the keys) | training[,-key,+key,-all]
+##                         (everything, each source switchable: state, meta, hud, timecode, truth); default real for
+##                         --mode=remote, training otherwise
+##   --info-port=<n> --info-hz=<n>   ground-truth UDP stream (information option "truth"), default 7790 / 240
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
@@ -39,6 +43,9 @@ const MODES := {
 	"aim_only": { "vision": true, "move": true, "fire": false, "size": Vector2i(0, 0) },
 	"fire_only": { "vision": true, "move": false, "fire": true, "size": Vector2i(0, 0) },
 	"blind": { "vision": false, "move": true, "fire": true, "size": Vector2i(0, 0) },
+	# Two-machine mode: the game publishes no image at all and only accepts commands; the player
+	# gets the pixels by his own means (screen capture…) and runs the algo elsewhere (see remote/).
+	"remote": { "vision": false, "move": true, "fire": true, "size": Vector2i(0, 0) },
 }
 
 @onready var world: World = $World
@@ -46,10 +53,30 @@ const MODES := {
 @onready var hud: HUD = $HUD
 @onready var menu: AlgoMenu = $HUD/AlgoMenu
 
+## Information profiles: what the game gives out besides the commands it accepts and the image of the chosen mode.
+##   "real"     : nothing at all but the keys (the contest condition: the player's program has to cope on its own);
+##   "training" : everything, each source switchable (for building and debugging the program).
+## Sources: state = the bridge's State block (position, shots, fps, clock…) · meta = frame headers (capture time, view
+## angles) · hud = every HUD text · timecode = the game clock encoded in the image · truth = ground-truth UDP stream.
+const INFO_KEYS := ["state", "meta", "hud", "timecode", "truth"]
+const INFO_LABELS := {
+	"state": "État (pont)", "meta": "Méta des images", "hud": "Textes du HUD", "timecode": "Code temporel dans l'image",
+	"truth": "Vérité terrain (UDP)",
+}
+signal info_changed
+
+const TimeCodeScript := preload("res://scripts/timecode.gd")
+const TruthStreamScript := preload("res://scripts/truth_stream.gd")
+
 var bridge: AimBridge
 var runner: AlgoRunner
 var bench: TriggerBench
 var mode_name := "full"
+var info_profile := "training"
+var info_toggles := { "state": true, "meta": true, "hud": true, "timecode": true, "truth": true }
+var timecode: Control
+var truth: Node
+var _state_blocked := false
 var agent_slug := ""
 var weapon_slug := ""
 
@@ -94,6 +121,7 @@ func _ready() -> void:
 	add_child(bench)
 	bench.setup(self)
 	bench.progress.connect(func(t: String) -> void: hud.bench_text = t)
+	_setup_info()
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
@@ -125,7 +153,7 @@ func _start_bench_from_args() -> void:
 		if _args.has(flag):
 			var v: Variant = _args[flag]
 			cfg[key] = v if typeof(v) == TYPE_BOOL or typeof(TriggerBench.DEFAULTS[key]) == TYPE_STRING else float(v)
-	cfg["wait_client"] = _args.has("--algo")
+	cfg["wait_client"] = _args.has("--algo") or _args.has("--bench-wait-client")  # remote mode: the relay is not an --algo
 	if _args.has("--bench-sniper"):
 		cfg["sniper"] = true
 	var algo_name := String(_args.get("--algo", "oracle" if cfg.get("oracle", false) else "human")).get_basename()
@@ -144,6 +172,9 @@ func _start_bench_from_args() -> void:
 func _start_bridge() -> void:
 	bridge = AimBridge.new()
 	bridge.name = "AimBridge"
+	# Drain the algo's commands before the player's _process of the same frame: otherwise the FIRE flag
+	# set by the bridge is only consumed one frame later (~1.9 ms at 500 fps).
+	bridge.process_priority = -100
 	bridge.shm_name = String(_args.get("--shm", "aimlabs"))
 	set_mode(String(_args.get("--mode", "full")))
 	bridge.assist_move.connect(func(delta_px: Vector2) -> void: player.add_look_delta(delta_px, Player.LookSource.ASSIST))
@@ -182,6 +213,64 @@ func set_mode(name: String) -> void:
 		bridge.set_mode(m["vision"], m["move"], m["fire"], m["size"])
 
 
+## --info=real | training[,-key][,+key][,-all][,+all]   (default: real for --mode=remote, training otherwise)
+func _setup_info() -> void:
+	timecode = TimeCodeScript.new()
+	timecode.name = "TimeCode"
+	hud.add_child(timecode)
+	truth = TruthStreamScript.new()
+	truth.name = "TruthStream"
+	add_child(truth)
+	truth.setup(self, int(_args.get("--info-port", 7790)), float(_args.get("--info-hz", 240.0)))
+	var spec := String(_args.get("--info", "real" if mode_name == "remote" else "training"))
+	var parts := spec.split(",", false)
+	var profile := String(parts[0]) if parts.size() > 0 else "training"
+	for p in parts.slice(1):
+		var key := String(p).substr(1)
+		var on := String(p).begins_with("+")
+		if key == "all":
+			for k in INFO_KEYS:
+				info_toggles[k] = on
+		elif INFO_KEYS.has(key):
+			info_toggles[key] = on
+		else:
+			push_warning("--info: unknown option '%s' (options: %s)" % [p, ", ".join(INFO_KEYS)])
+	set_info_profile(profile)
+
+
+func info_on(key: String) -> bool:
+	return info_profile == "training" and bool(info_toggles.get(key, false))
+
+
+func set_info_profile(profile: String) -> void:
+	info_profile = "real" if profile == "real" else "training"
+	_apply_info()
+
+
+func set_info_toggle(key: String, on: bool) -> void:
+	info_toggles[key] = on
+	_apply_info()
+
+
+func _apply_info() -> void:
+	var st := info_on("state")
+	var me := info_on("meta")
+	_state_blocked = false
+	if bridge:
+		if bridge.has_method("set_info"):
+			bridge.set_info(st, me)
+		elif not (st and me):
+			# fail closed: an old bridge binary cannot mask the State block, so it gets nothing at all
+			push_error("AimBridge binary too old for the 'real' information profile: rebuild it (bridge/). State block disabled.")
+			_state_blocked = true
+	hud.set_text_enabled(info_on("hud"))
+	if timecode:
+		timecode.visible = info_on("timecode")
+	if truth:
+		truth.enabled = info_on("truth")
+	info_changed.emit()
+
+
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and player.mouse_captured:
 		if event.keycode == KEY_R:
@@ -192,14 +281,24 @@ func _unhandled_input(event: InputEvent) -> void:
 		world.respawn_all()
 
 
+var _trace_timer := 0.0
+
+
 func _process(delta: float) -> void:
 	_frames += 1
-	if bridge and bridge.is_running():
+	if bridge and bridge.is_running() and not _state_blocked:
 		bridge.publish_state(_player_state())
 		_stats_timer += delta
 		if _stats_timer >= 0.25:
 			_stats_timer = 0.0
 			hud.bridge_text = _bridge_hud_text()
+			if _args.has("--bridge-trace"):
+				_trace_timer += 0.25
+				if _trace_timer >= 2.0:
+					_trace_timer = 0.0
+					var t: Dictionary = bridge.get_stats()
+					print("TRACE fps %.0f  readback %.2f ms  published %.2f ms  copy %.2f ms  capture->cmd %.2f ms  cmd->fire %.2f ms" % [
+						Engine.get_frames_per_second(), t.get("readback_ms", 0.0), t.get("publish_total_ms", 0.0), t["last_publish_ms"], t["avg_latency_ms"], player.assist_fire_lag_ms])
 	if _args.has("--smoke-test"):
 		_smoke_test_step()
 	elif _args.has("--screenshot") and _frames == 20:
@@ -243,6 +342,7 @@ func _bridge_hud_text() -> String:
 	if s["client_connected"]:
 		line += "\n%.0f frames/s  copy %.2f ms  cmd %d (%d dropped)  latency %.1f ms" % [
 			s["publish_fps"], s["last_publish_ms"], s["cmds_applied"], s["cmds_dropped"], s["avg_latency_ms"]]
+		line += "\nreadback %.1f ms  published %.1f ms after capture  fire lag %.1f ms" % [s.get("readback_ms", 0.0), s.get("publish_total_ms", 0.0), player.assist_fire_lag_ms]
 	if runner and runner.current_path != "":
 		line += "\nAlgo: " + runner.status_text()
 	return line

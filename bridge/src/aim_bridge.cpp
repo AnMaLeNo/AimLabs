@@ -123,6 +123,7 @@ void AimBridge::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shm_name", "name"), &AimBridge::set_shm_name);
 	ClassDB::bind_method(D_METHOD("get_shm_name"), &AimBridge::get_shm_name);
 	ClassDB::bind_method(D_METHOD("set_mode", "vision", "allow_move", "allow_fire", "vision_size"), &AimBridge::set_mode, DEFVAL(Vector2i()));
+	ClassDB::bind_method(D_METHOD("set_info", "state", "meta"), &AimBridge::set_info);
 	ClassDB::bind_method(D_METHOD("get_mode"), &AimBridge::get_mode);
 	ClassDB::bind_method(D_METHOD("publish_state", "state"), &AimBridge::publish_state);
 	ClassDB::bind_method(D_METHOD("is_client_connected"), &AimBridge::is_client_connected);
@@ -239,11 +240,20 @@ void AimBridge::set_mode(bool p_vision, bool p_allow_move, bool p_allow_fire, co
 	}
 }
 
+void AimBridge::set_info(bool p_state, bool p_meta) {
+	_info_state = p_state;
+	_info_meta = p_meta;
+	if (_shm.is_open()) {
+		_write_mode_flags();
+	}
+}
+
 void AimBridge::_write_mode_flags() {
 	Header *h = _header();
 	h->vision_width = (uint32_t)_vision_size.x;
 	h->vision_height = (uint32_t)_vision_size.y;
-	uint32_t flags = (_vision ? MODE_VISION : 0) | (_allow_move ? MODE_MOVE : 0) | (_allow_fire ? MODE_FIRE : 0);
+	uint32_t flags = (_vision ? MODE_VISION : 0) | (_allow_move ? MODE_MOVE : 0) | (_allow_fire ? MODE_FIRE : 0) |
+			(_info_state.load() ? MODE_INFO_STATE : 0) | (_info_meta.load() ? MODE_INFO_META : 0);
 	atomic_store<uint32_t>(&h->mode_flags, flags);
 }
 
@@ -336,6 +346,11 @@ void AimBridge::_on_readback(const PackedByteArray &p_data) {
 		_frames_dropped.fetch_add(1);
 		return;
 	}
+	{
+		double ms = (double)(now_usec() - meta.capture_usec) / 1000.0;
+		double avg = _readback_ms_avg.load();
+		_readback_ms_avg.store(avg <= 0.0 ? ms : avg * 0.95 + ms * 0.05);
+	}
 	_enqueue(meta, p_data);
 }
 
@@ -422,12 +437,13 @@ void AimBridge::_publish_frame(const Job &p_job) {
 	slot->height = out_h;
 	slot->stride = out_w * 4;
 	slot->frame_id = m.frame_id;
-	slot->capture_usec = m.capture_usec;
-	slot->yaw_deg = m.yaw;
-	slot->pitch_deg = m.pitch;
-	slot->fov_deg = m.fov;
+	const bool meta = _info_meta.load();
+	slot->capture_usec = meta ? m.capture_usec : 0;
+	slot->yaw_deg = meta ? m.yaw : 0.0f;
+	slot->pitch_deg = meta ? m.pitch : 0.0f;
+	slot->fov_deg = meta ? m.fov : 0.0f;
 	slot->flags = 0;
-	slot->render_frame = m.render_frame;
+	slot->render_frame = meta ? m.render_frame : 0;
 	const uint8_t *src = p_job.data.ptr();
 	if (out_w == m.width && out_h == m.height) {
 		std::memcpy(pixels, src, (size_t)out_w * out_h * 4);
@@ -445,6 +461,11 @@ void AimBridge::_publish_frame(const Job &p_job) {
 		_history_id[i] = m.frame_id;
 		_history_usec[i] = m.capture_usec;
 	}
+	{
+		double ms = (double)(now_usec() - m.capture_usec) / 1000.0;
+		double avg = _publish_total_ms_avg.load();
+		_publish_total_ms_avg.store(avg <= 0.0 ? ms : avg * 0.95 + ms * 0.05);
+	}
 	_frames_published.fetch_add(1);
 	_last_publish_ms.store(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
 }
@@ -458,7 +479,7 @@ void AimBridge::_process(double p_delta) {
 	_tick++;
 	uint64_t now = now_usec();
 	Header *h = _header();
-	atomic_store<uint64_t>(&h->game_heartbeat_usec, now);
+	atomic_store<uint64_t>(&h->game_heartbeat_usec, _info_state.load() ? now : _tick); // no game clock unless allowed
 
 	uint64_t hb = atomic_load<uint64_t>(&h->client_heartbeat);
 	if (hb != _last_heartbeat) {
@@ -556,33 +577,39 @@ void AimBridge::publish_state(const Dictionary &p_state) {
 	uint32_t mouse_buttons = 0;
 	poll_keyboard(key_bits, physical_key_bits, &mouse_buttons);
 	atomic_store<uint32_t>(&s->seq, s->seq + 1);
-	s->keys = (uint32_t)(int64_t)p_state.get("keys", 0);
-	s->tick = _tick;
-	s->time_usec = now_usec();
-	s->pos[0] = pos.x;
-	s->pos[1] = pos.y;
-	s->pos[2] = pos.z;
-	s->vel[0] = vel.x;
-	s->vel[1] = vel.y;
-	s->vel[2] = vel.z;
-	s->yaw_deg = _yaw;
-	s->pitch_deg = _pitch;
-	s->fov_deg = _fov;
-	s->sens_deg_per_px = _sens;
-	s->real_look_dx = real_look.x;
-	s->real_look_dy = real_look.y;
-	s->assist_look_dx = assist_look.x;
-	s->assist_look_dy = assist_look.y;
-	s->shots = (uint32_t)(int64_t)p_state.get("shots", 0);
-	s->hits = (uint32_t)(int64_t)p_state.get("hits", 0);
-	s->headshots = (uint32_t)(int64_t)p_state.get("headshots", 0);
-	s->kills = (uint32_t)(int64_t)p_state.get("kills", 0);
-	s->cmds_applied = _cmds_applied;
-	s->cmds_dropped = _cmds_dropped;
-	s->last_latency_usec = _last_latency_usec;
-	s->avg_latency_usec = (uint64_t)_avg_latency_usec;
-	s->fps = (float)(double)p_state.get("fps", 0.0);
-	s->frames_published = _frames_published.load();
+	// Information profile: without MODE_INFO_STATE only the keys leave the game; everything else is zero.
+	const bool full = _info_state.load();
+	uint32_t keys = (uint32_t)(int64_t)p_state.get("keys", 0);
+	if (!full) {
+		keys &= KEY_FORWARD | KEY_BACK | KEY_LEFT | KEY_RIGHT | KEY_JUMP | KEY_SPRINT | KEY_FIRE; // not mouse_captured / on_floor
+	}
+	s->keys = keys;
+	s->tick = full ? _tick : 0;
+	s->time_usec = full ? now_usec() : 0;
+	s->pos[0] = full ? pos.x : 0.0f;
+	s->pos[1] = full ? pos.y : 0.0f;
+	s->pos[2] = full ? pos.z : 0.0f;
+	s->vel[0] = full ? vel.x : 0.0f;
+	s->vel[1] = full ? vel.y : 0.0f;
+	s->vel[2] = full ? vel.z : 0.0f;
+	s->yaw_deg = full ? _yaw : 0.0f;
+	s->pitch_deg = full ? _pitch : 0.0f;
+	s->fov_deg = full ? _fov : 0.0f;
+	s->sens_deg_per_px = full ? _sens : 0.0f;
+	s->real_look_dx = full ? real_look.x : 0.0f;
+	s->real_look_dy = full ? real_look.y : 0.0f;
+	s->assist_look_dx = full ? assist_look.x : 0.0f;
+	s->assist_look_dy = full ? assist_look.y : 0.0f;
+	s->shots = full ? (uint32_t)(int64_t)p_state.get("shots", 0) : 0;
+	s->hits = full ? (uint32_t)(int64_t)p_state.get("hits", 0) : 0;
+	s->headshots = full ? (uint32_t)(int64_t)p_state.get("headshots", 0) : 0;
+	s->kills = full ? (uint32_t)(int64_t)p_state.get("kills", 0) : 0;
+	s->cmds_applied = full ? _cmds_applied : 0;
+	s->cmds_dropped = full ? _cmds_dropped : 0;
+	s->last_latency_usec = full ? _last_latency_usec : 0;
+	s->avg_latency_usec = full ? (uint64_t)_avg_latency_usec : 0;
+	s->fps = full ? (float)(double)p_state.get("fps", 0.0) : 0.0f;
+	s->frames_published = full ? _frames_published.load() : 0;
 	std::memcpy(s->key_bits, key_bits, sizeof(key_bits));
 	std::memcpy(s->physical_key_bits, physical_key_bits, sizeof(physical_key_bits));
 	s->mouse_buttons = mouse_buttons;
@@ -597,6 +624,8 @@ Dictionary AimBridge::get_stats() const {
 	d["frames_dropped"] = (int64_t)_frames_dropped.load();
 	d["publish_fps"] = _publish_fps;
 	d["last_publish_ms"] = _last_publish_ms.load();
+	d["readback_ms"] = _readback_ms_avg.load();
+	d["publish_total_ms"] = _publish_total_ms_avg.load();
 	d["last_latency_ms"] = _last_latency_usec / 1000.0;
 	d["avg_latency_ms"] = _avg_latency_usec / 1000.0;
 	d["cmds_applied"] = (int64_t)_cmds_applied;

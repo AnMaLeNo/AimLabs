@@ -23,3 +23,8 @@ __pycache__/
 bench_results/
 sdk/rust/aimlabs/target/
 algos/rust/sniper-rs/target/
+
+# sniper-rs : modèles dérivés par algos/rust/sniper-rs/tools/make_gpu_model.py
+algos/*_u8.onnx
+algos/*_dec.onnx
+algos/*_u8_dec.onnx

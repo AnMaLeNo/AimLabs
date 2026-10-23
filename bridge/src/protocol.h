@@ -23,6 +23,10 @@ constexpr uint32_t PIXEL_FORMAT_RGBA8 = 1;
 constexpr uint32_t MODE_VISION = 1u << 0; // frames are published
 constexpr uint32_t MODE_MOVE = 1u << 1;   // MOVE commands are applied
 constexpr uint32_t MODE_FIRE = 1u << 2;   // FIRE commands are applied
+// Information profile (what the game gives out besides frames): see AimBridge::set_info. A client can read these to
+// know what is available; when clear, the corresponding data is simply zero.
+constexpr uint32_t MODE_INFO_STATE = 1u << 3; // State block carries game info (pos, shots, fps, clock…), not only the keys
+constexpr uint32_t MODE_INFO_META = 1u << 4;  // frame headers carry capture time / view angles / render frame
 
 constexpr uint32_t CMD_MOVE = 1;
 constexpr uint32_t CMD_FIRE = 2;

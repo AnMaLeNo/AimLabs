@@ -8,6 +8,8 @@ pub const PIXEL_FORMAT_RGBA8: u32 = 1;
 pub const MODE_VISION: u32 = 1 << 0;
 pub const MODE_MOVE: u32 = 1 << 1;
 pub const MODE_FIRE: u32 = 1 << 2;
+pub const MODE_INFO_STATE: u32 = 1 << 3; // State block carries game info (else only the keys)
+pub const MODE_INFO_META: u32 = 1 << 4;  // frame headers carry capture time / view angles / render frame
 
 pub const CMD_MOVE: u32 = 1;
 pub const CMD_FIRE: u32 = 2;

@@ -35,6 +35,9 @@ public:
 
 	// vision_size = Vector2i(0, 0) publishes the native viewport resolution.
 	void set_mode(bool p_vision, bool p_allow_move, bool p_allow_fire, const Vector2i &p_vision_size);
+	// Information profile: p_state = the State block carries game info (else only the keys, and the game heartbeat
+	// is an opaque counter instead of the game clock); p_meta = frame headers carry capture time / view angles.
+	void set_info(bool p_state, bool p_meta);
 	Dictionary get_mode() const;
 
 	void publish_state(const Dictionary &p_state);
@@ -121,6 +124,8 @@ private:
 	std::atomic<uint32_t> _frames_published{ 0 };
 	std::atomic<uint32_t> _frames_dropped{ 0 };
 	std::atomic<double> _last_publish_ms{ 0.0 };
+	std::atomic<double> _readback_ms_avg{ 0.0 }; // capture → data back on the CPU (async GPU readback)
+	std::atomic<double> _publish_total_ms_avg{ 0.0 }; // capture → frame visible in shared memory
 	uint32_t _cmds_applied = 0;
 	uint32_t _cmds_dropped = 0;
 	uint64_t _last_latency_usec = 0;
@@ -128,6 +133,8 @@ private:
 	uint64_t _last_heartbeat = 0;
 	uint64_t _last_heartbeat_change_usec = 0;
 	bool _client_connected = false;
+	std::atomic<bool> _info_state{ true };
+	std::atomic<bool> _info_meta{ true };
 	uint64_t _tick = 0;
 	double _fps_accum = 0.0;
 	uint32_t _fps_frames = 0;

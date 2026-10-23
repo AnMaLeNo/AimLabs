@@ -21,7 +21,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from aimlabs import AimClient
+from aimlabs import AimClient, frame_latency_s
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from yolo_aim import Detector  # noqa: E402  (même dossier)
@@ -113,11 +113,11 @@ def main(argv) -> int:
             cx, cy = f.width / 2.0, f.height / 2.0
             shifted = boxes
             lead_dx, lead_dy = 0.0, 0.0
-            if not args.no_lead and prev is not None and boxes and prev[0] and f.capture_usec > prev[1]:
+            if not args.no_lead and prev is not None and boxes and prev[0] and f.time_us > prev[1]:
                 st = c.state()
                 # la balle part à la prochaine frame de jeu après réception : latence capture→maintenant + 1 frame
-                latency = max(st["time_usec"] - f.capture_usec, 0) / 1e6 + 1.0 / max(st["fps"], 1.0)
-                dt = (f.capture_usec - prev[1]) / 1e6
+                latency = frame_latency_s(st, f)
+                dt = (f.time_us - prev[1]) / 1e6
                 shifted = []
                 for b in boxes:
                     # boîte précédente la plus proche (même cible) → vitesse écran
@@ -129,7 +129,7 @@ def main(argv) -> int:
                         lead_dx, lead_dy = vx * latency, vy * latency
                     else:
                         shifted.append(b)
-            prev = (boxes, f.capture_usec)
+            prev = (boxes, f.time_us)
             # marque = ce que l'image montre (vérité à la capture, pour le benchmark) ;
             # tir = boîte avancée de la latence (là où la cible sera quand la balle partira)
             seen = box_under(boxes, cx, cy, args.margin, seg, (cx, cy))

@@ -25,6 +25,7 @@ const DEFAULTS := {
 	"speed_start": 2.0, "speed_min": 0.25, "speed_max": 150.0, "precision": 0.1, "confirm": 2,
 	"width": 1.2, "travel_widths": 2.0, "heights": "chest", "criterion": "auto",
 	"mark_tolerance": 0.03, "settle": 3.0, "pause": 0.3, "wait_client": false, "oracle": false,
+	"fixed_speed": 0.0, "passes": 20,  # fixed_speed > 0: `passes` sweeps at that single speed (success rate instead of the speed search)
 	"sniper": false, "max_shots": 1,  # sniper: one bullet per sweep — success = ≥ 1 hit with ≤ max_shots shots
 	"truth": "auto",  # visual (silhouette under the reticle, what a vision algo sees) | hitbox | auto = visual when the probe works
 }
@@ -53,6 +54,8 @@ var _lo := 0.0
 var _hi := 0.0
 var _confirm_left := 0
 var _confirm_hits := 0
+var _fixed_hits := 0
+var _fixed_done := 0
 var _dist_entry: Dictionary = {}
 var _phase := ""           # "settle" | "pause" | "cross" | "done"
 var _timer := 0.0
@@ -180,7 +183,9 @@ func _begin_height() -> void:
 
 func _begin_distance() -> void:
 	_dist_entry = { "distance": _distance, "max_speed_hit": 0.0, "sweeps": [], "confirm_hits": 0 }
-	_speed = float(config["speed_start"])
+	_speed = float(config["fixed_speed"]) if float(config["fixed_speed"]) > 0.0 else float(config["speed_start"])
+	_fixed_hits = 0
+	_fixed_done = 0
 	_lo = 0.0
 	_hi = 0.0
 	_confirm_left = 0
@@ -492,6 +497,16 @@ func _end_pass() -> void:
 		("  sniper: " + String(_pass_stats["outcome"])) if bool(config["sniper"]) else "",
 		"  (confirmation)" if _confirm_left > 0 else ""])
 	_dir = -_dir
+	if float(config["fixed_speed"]) > 0.0:
+		_fixed_hits += int(hit)
+		_fixed_done += 1
+		if _fixed_done >= int(config["passes"]):
+			_lo = _speed if _fixed_hits > 0 else 0.0
+			print("bench: vitesse fixe %.2f m/s → %d/%d réussites" % [_speed, _fixed_hits, _fixed_done])
+			_end_distance()
+		else:
+			_next_sweep()
+		return
 	if _confirm_left > 0:
 		_confirm_left -= 1
 		_confirm_hits += int(hit)

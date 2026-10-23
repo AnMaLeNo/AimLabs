@@ -51,3 +51,46 @@ le segment partagé en cours). La première ligne de la docstring sert de descri
   tronquée par le crop à l'entrée, la boîte avance à mi-vitesse et le tir part en retard.
 
 Pour pointer le jeu sur un autre dossier : `--algos=/chemin` (ou le bouton « Dossier » du menu).
+
+## sniper-rs (port Rust, `algos/rust/sniper-rs`)
+
+```
+cargo build --release --features cuda,tensorrt          # toolchain stable-x86_64-pc-windows-gnu suffit
+ORT_DYLIB_PATH=<onnxruntime GPU>/onnxruntime.dll AIMLABS_AUTOSTART=1 \
+  sniper-rs --ep tensorrt --libs "<dossier TensorRT>;<dossier CUDA 12 + cuDNN 9>"
+```
+
+* `--ep tensorrt` (défaut) | `cuda` | `cpu`, `--no-graph` pour couper le CUDA graph. Entrée et sorties
+  sont des tampons fixes liés à la session (IoBinding) ; avec le CUDA graph les ~350 kernels sont
+  rejoués en un lancement. **Un EP demandé qui ne se charge pas est une erreur** : ONNX Runtime
+  retombe sinon en silence sur le CPU (c'est ce qui a faussé les premières mesures « CUDA »).
+* DLL à fournir via `--libs` (ou le PATH) : `cudart64_12`, `cublas(Lt)64_12`, `cudnn64_9` + ses
+  moteurs, et pour TensorRT `nvinfer_10` (les dossiers `torch/lib` et `tensorrt_libs` d'un env Python
+  les contiennent). Le **premier** lancement TensorRT construit le moteur FP16 (~5 min, mis en cache
+  dans `%TEMP%/aimlabs_trt`) ; les suivants chargent en < 1 s.
+* `ortbench` (`src/bin/ortbench.rs`) mesure l'inférence seule : `ortbench cpu-tensor iobind graph trt trtgraph`.
+* Mesures RTX 3080, 256×256, jeu ouvert (`--stats` intégré) : CPU 9,9 ms · ORT CUDA 6,7 ms (lancement
+  des kernels, l'IoBinding seul n'y change rien) · CUDA graph 2,5 ms · **TensorRT EP + CUDA graph
+  0,8 ms isolé, 1,7 ms en jeu** (envoi 0,12 · exéc 1,4 · retour 0,15) · TensorRT natif Python sans
+  graphe 2,1 ms, avec graphe 1,0 ms. Bench sniper 5 m torse : limite 3,75 m/s (CPU : 1,88 m/s).
+
+### Modèles dérivés (`algos/rust/sniper-rs/tools/make_gpu_model.py`)
+
+`python make_gpu_model.py in.onnx out.onnx [--u8] [--decode]` greffe du pré/post-traitement sur le graphe ;
+`sniper-rs --model out.onnx` détecte la forme (`[entrée u8]`, `[décodage GPU]`) tout seul.
+`--u8` : entrée `uint8` NHWC (cast, /255, transposition dans le graphe) ; `--decode` : `det` (5, K=32) +
+`mask_logits` (K, 16 lignes × 64) au lieu des 1,15 Mo de sorties brutes. Équivalence vérifiée sur images réelles
+(écart max 7e-4 en entrée, 0 en décodage ; K=8 ou 16 perd des personnes dans une foule, 32 non).
+Gain mesuré en jeu (~515 frames/s) : envoi 0,12 → 0,05 ms, retour 0,14 → 0,06 ms, mais l'exécution GPU gagne
+0,1 ms de nœuds en plus : **inférence 1,71 → 1,65 ms, préparation du crop 0,19 → 0,15 ms** (≈ 0,1 ms au total),
+sans effet mesurable sur la vitesse limite du bench. Les modèles dérivés sont ignorés par git.
+
+### Latence capture → tir côté jeu (`--bridge-trace`)
+
+`godot --path game -- --map=range --bridge-trace` imprime toutes les 2 s : lecture GPU (`readback`),
+capture → frame visible dans la mémoire partagée (`published`), capture → commande appliquée, et commande → tir
+réel (`cmd->fire`). Mesures RTX 3080 à ~520 fps : lecture GPU 3,6 ms (`texture_get_data_async` rend les données
+~2 frames plus tard : structurel), copie mémoire partagée 0,2 ms, capture → commande 5,5 ms. Le nœud du pont
+tournait **après** le joueur dans la frame : le drapeau de tir n'était lu qu'à la frame suivante (`cmd->fire`
+1,65 ms) ; `bridge.process_priority = -100` le ramène à 0,05 ms. Essayés sans gain : lecture synchrone sur le
+thread de rendu (lecture 1,6 ms mais jeu à 290 fps), `get_image()` (110 fps), attente active côté SDK (5,53 vs 5,60 ms).

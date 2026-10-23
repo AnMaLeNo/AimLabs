@@ -29,7 +29,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sdk", "python"))
-from aimlabs import AimClient  # noqa: E402
+from aimlabs import AimClient, frame_latency_s  # noqa: E402
 from yolo_aim import Detector  # noqa: E402
 
 TOGGLE_KEY = "CAPSLOCK"
@@ -163,7 +163,7 @@ def main(argv) -> int:
             n_frames += 1
             ms_acc += det.last_ms
             cx, cy = crop.shape[1] / 2.0, crop.shape[0] / 2.0
-            t_cap = f.capture_usec / 1e6
+            t_cap = f.time_us / 1e6
             if not boxes:
                 track.reset()
                 locked = False
@@ -184,7 +184,7 @@ def main(argv) -> int:
                 continue
             # prédiction : où sera la cible quand la balle partira ?
             st = c.state()
-            latency = max(st["time_usec"] - f.capture_usec, 0) / 1e6 + 1.0 / max(st["fps"], 1.0)
+            latency = frame_latency_s(st, f)
             vel = track.velocity()
             dx, dy = 0.0, 0.0
             if vel is not None and args.lead_scale > 0.0:

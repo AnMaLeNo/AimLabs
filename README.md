@@ -114,7 +114,7 @@ Le bench attend le réarmement de l'arme entre deux traversées.
 Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
 `--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
 `--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-max-shots`, `--bench-mark-tolerance`, `--bench-settle`,
-`--bench-pause`, `--bench-out=<json>`. Menu Échap (map Stand de tir) : bouton **Benchmark tir
+`--bench-pause`, `--bench-out=<json>`, `--bench-fixed-speed=<m/s> --bench-passes=<N>` (N traversées à une seule vitesse → touches/N, plus stable que la recherche de la limite), `--bench-wait-client` (attend un client sans `--algo`). Menu Échap (map Stand de tir) : bouton **Benchmark tir
 auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
 `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).
 
@@ -162,8 +162,21 @@ with AimClient() as c:                 # s'attache à la mémoire partagée "aim
 * **Latence** : chaque commande porte l'id de la frame qui l'a motivée ; le jeu mesure
   `capture → application` avec sa propre horloge (affiché dans le HUD et dans `state()`).
 * **Modes de jeu** (`-- --mode=<nom>`) : `full` (défaut), `lowres` (image fournie en 640×360),
-  `tiny` (320×180), `aim_only` (tir refusé), `fire_only` (visée refusée), `blind` (pas d'image).
+  `tiny` (320×180), `aim_only` (tir refusé), `fire_only` (visée refusée), `blind` (pas d'image),
+  `remote` (**deux machines** : le jeu ne publie aucune image, il accepte seulement les commandes ; voir `remote/`).
   Les commandes refusées sont comptées dans `cmds_dropped`. Définis dans `game/scripts/game.gd`.
+* **Profils d'information** (`-- --info=real|training`, ou le menu Échap) : ce que le jeu laisse sortir en plus de
+  l'image du mode. **`real`** (défaut pour `--mode=remote`) : *rien* que les touches — le bloc d'état du pont ne contient
+  que le clavier et la souris (ni position, ni tirs, ni FPS, ni horloge ; le « heartbeat » est un compteur opaque), les
+  en-têtes d'image n'ont ni instant de capture ni angles, aucun texte de HUD. **`training`** (défaut des autres modes) :
+  tout, chaque source se coche/décoche : `state` (bloc d'état complet), `meta` (en-têtes d'image), `hud` (textes),
+  `timecode` (l'horloge du jeu encodée en 26 cellules dans l'image, 110 px au-dessus du réticule : voir `game/scripts/timecode.gd`)
+  et `truth` (vérité terrain en JSON par UDP sur `127.0.0.1:7790` : cibles, boîtes à l'écran, réticule, tirs, benchmark).
+  Exemples : `--info=training,-timecode,-truth`, `--info=training,-all,+state`. `python sdk/python/examples/info_check.py
+  --expect real` liste ce que le jeu donne et échoue s'il fuit quelque chose. Les algos du dépôt (`yolo_sniper`,
+  `yolo_trigger`, `sniper-rs`) tournent en `real` (horloge locale + `--latency-ms` pour `sniper-rs`) ; `yolo_aim` a besoin de
+  `state` (angles, sensibilité) donc de `training`. Les binaires Linux/macOS du pont doivent être reconstruits pour
+  appliquer `real` (sinon l'état est coupé entièrement, avec une erreur).
 * **Clavier / souris du joueur** : l'état publie les touches enfoncées (keycodes Godot,
   disposition *et* physiques) et les boutons de souris, pour que la pipeline réagisse aux
   touches du joueur (modes, réglages, « vise seulement tant que j'appuie »…) :

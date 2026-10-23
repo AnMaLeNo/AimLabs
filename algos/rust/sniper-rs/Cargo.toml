@@ -7,6 +7,7 @@ description = "AimLabs « une balle » trigger in Rust: zero-copy crop from the 
 [dependencies]
 aimlabs = { path = "../../../sdk/rust/aimlabs" }
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["ndarray", "load-dynamic"] }
+libloading = "0.8"
 ndarray = "0.16"
 
 [features]
