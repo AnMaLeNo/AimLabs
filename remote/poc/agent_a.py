@@ -18,9 +18,11 @@ import collections
 import json
 import os
 import socket
+import struct
 import sys
 import threading
 import time
+import traceback
 
 import numpy as np
 
@@ -67,7 +69,10 @@ def main() -> int:
     ap.add_argument("--apply-lead-ms", type=float, default=1.0, help="tirs programmés : avance de l'envoi dans le jeu (le jeu applique les commandes au début de sa frame suivante)")
     ap.add_argument("--state-hz", type=float, default=60.0)
     ap.add_argument("--stats", type=float, default=2.0)
+    ap.add_argument("--record", default="", help="enregistre les images envoyées (HELLO + FRAME) dans ce fichier : à rejouer avec replay_agent.py")
     args = ap.parse_args()
+    if hasattr(sys.stdout, "reconfigure"):   # sortie redirigée sous Windows = cp1252 : « → » y plante le print des stats
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     if args.transport == "udp" and not args.connect:
         ap.error("--transport udp nécessite --connect")
 
@@ -197,7 +202,12 @@ def main() -> int:
         elif kind == R.CMD_MARK:
             aim.mark(frame_id=0, x=dx, y=dy)
 
-    send(R.T_HELLO, json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode, "udp": use_udp}).encode())
+    hello = json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode, "udp": use_udp}).encode()
+    send(R.T_HELLO, hello)
+    rec = None
+    if args.record:
+        rec = open(args.record, "wb", buffering=1 << 22)
+        rec.write(b"AIMREC1\n" + struct.pack("<I", len(hello)) + hello)
 
     def udp_loop() -> None:
         # poignée de main : on envoie U_HELLO jusqu'à ce que B réponde, puis on écoute les commandes
@@ -298,6 +308,8 @@ def main() -> int:
                 cap_times.popitem(last=False)
             hdr = R.FRAME_HDR.pack(c.index, c.t_us, W, H, ox, oy, w, h, codec)
             send(R.T_FRAME, hdr + data)
+            if rec is not None:
+                rec.write(struct.pack("<I", len(hdr) + len(data)) + hdr + data)
             sent["frames"] += 1
             sent["bytes"] += len(data)
             el = time.monotonic() - t_stats
@@ -316,9 +328,13 @@ def main() -> int:
                 rtts.clear()
     except (ConnectionError, OSError):
         pass
+    except Exception:
+        traceback.print_exc()   # os._exit ci-dessous perdrait la trace : un agent qui meurt en silence ressemble à « jeu fermé » côté B
     finally:
         stop.set()
         cap.stop()
+        if rec is not None:
+            rec.close()
         print("agent A : fin", flush=True)
         os._exit(0)  # évite le bruit COM de dxcam à l'arrêt
 
