@@ -32,6 +32,8 @@ elif a.cmd == "key":
     req["mods"] = a.mods
 elif a.cmd == "raw":
     req["hex"] = a.arg
+elif a.cmd == "fire":
+    req["rx"] = int(a.arg or 0)      # `btkbd-send fire 2000` : also return the last 2000 received orders (arrival log)
 
 s = socket.socket(socket.AF_UNIX)
 s.connect("/run/btkbd.sock")

@@ -48,12 +48,32 @@ def focus_game(timeout=45.0):
     return False
 
 
-def pi_stats(pi_ssh):
-    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-i", A.KEY, pi_ssh, "sudo btkbd-send fire"], capture_output=True, text=True, timeout=30)
+def pi_stats(pi_ssh, rx=0):
+    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-i", A.KEY, pi_ssh, f"sudo btkbd-send fire {rx}"], capture_output=True, text=True, timeout=30)
     try:
         return json.loads(r.stdout)
     except ValueError:
         return {}
+
+
+def rx_summary(entries):
+    """Ordres programmés reçus par le Pi : avance sur l'échéance À L'ARRIVÉE (ms ; < 0 = arrivé en retard) = la mesure du réseau B -> Pi dans les conditions réelles.
+    On regroupe en « rafales » (un passage de cible = une rafale d'ordres mis à jour image par image)."""
+    if not entries:
+        return {}
+    leads = [e[4] / 1e6 for e in entries]
+    bursts, cur = [], [entries[0]]
+    for e in entries[1:]:
+        if (e[0] - cur[-1][0]) / 1e6 > 400:
+            bursts.append(cur)
+            cur = []
+        cur.append(e)
+    bursts.append(cur)
+    last = [b[-1][4] / 1e6 for b in bursts]
+    q = lambda v, p: sorted(v)[min(int(len(v) * p), len(v) - 1)]
+    return {"ordres": len(entries), "tard_%": round(100 * sum(1 for x in leads if x < 0) / len(leads), 1), "avance_p10": round(q(leads, 0.1), 1),
+            "avance_p50": round(q(leads, 0.5), 1), "avance_p90": round(q(leads, 0.9), 1), "rafales": len(bursts),
+            "dernier_ordre_de_la_rafale_tard_%": round(100 * sum(1 for x in last if x < 0) / len(last), 1), "dernier_avance_p50": round(q(last, 0.5), 1)}
 
 
 def run(speed, passes, pi, lead_ms, bias_ms, settle, tag, extra_b=""):
@@ -64,7 +84,10 @@ def run(speed, passes, pi, lead_ms, bias_ms, settle, tag, extra_b=""):
     out_json = os.path.join(A.ROOT, "bench_results", f"livepi_{tag}.json")
     game_log = os.path.join(A.ROOT, "bench_results", f"livepi_{tag}.game.log")
     agent_log = os.path.join(A.ROOT, "bench_results", f"livepi_{tag}.agent.log")
-    pi_before = pi_stats(f"claude@{pi}").get("fire", {}).get("stats", {})
+    pb = pi_stats(f"claude@{pi}", 4000)
+    pi_before = pb.get("fire", {}).get("stats", {})
+    rx_before = pb.get("rx", [])
+    t_rx_last = rx_before[-1][0] if rx_before else 0
     gl = open(game_log, "w", encoding="utf-8", errors="replace")
     game = subprocess.Popen([GODOT, "--path", os.path.join(A.ROOT, "game"), "--always-on-top", "--", "--mode=silent", "--map=range", "--fire-key=G", "--bench-sniper",
                              "--bench-criterion=hit", f"--bench-settle={settle}", "--bench-distance-start=5", "--bench-distance-max=5", "--bench-heights=chest",
@@ -88,11 +111,13 @@ def run(speed, passes, pi, lead_ms, bias_ms, settle, tag, extra_b=""):
     A.ssh(f"for p in $(pgrep -P {b_pid}); do kill $p; done; kill {b_pid}; sleep 0.5; pkill -f '[s]niper_b.py'")
     kill_local()
     gl.close()
-    pi_after = pi_stats(f"claude@{pi}").get("fire", {}).get("stats", {})
+    pa = pi_stats(f"claude@{pi}", 4000)
+    pi_after = pa.get("fire", {}).get("stats", {})
+    rx_new = [e for e in pa.get("rx", []) if e[0] > t_rx_last]
     g = open(game_log, encoding="utf-8", errors="replace").read()
     m = re.search(r"→ (\d+)/(\d+) réussites", g)
     hits = int(m.group(1)) if m else None
-    return dict(ok=ok, hits=hits, passes=passes, out_json=out_json, b_log=text, pi_delta={k: pi_after.get(k, 0) - pi_before.get(k, 0) for k in pi_after})
+    return dict(ok=ok, hits=hits, passes=passes, out_json=out_json, b_log=text, pi_delta={k: pi_after.get(k, 0) - pi_before.get(k, 0) for k in pi_after}, rx=rx_summary(rx_new))
 
 
 def main():
@@ -110,6 +135,7 @@ def main():
     if not r["ok"]:
         return 1
     print(f"vitesse {a.speed:g} m/s : {r['hits']}/{a.passes} touches ; serveur de tir du Pi : {r['pi_delta']}")
+    print("  ordres reçus par le Pi (avance sur l'échéance à l'arrivée, ms) :", r["rx"])
     shot_timing.report(r["out_json"])
     for line in [l for l in r["b_log"].splitlines() if l.startswith("[pi]")][-3:]:
         print(" ", line[:230])

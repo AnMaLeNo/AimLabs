@@ -47,9 +47,10 @@ def main():
         while time.perf_counter() < t_next - 0.0015:
             time.sleep(0.0005)
         due_b = time.perf_counter() + a.ahead_ms / 1000
+        theta_ms = fx.offset_ns(int(due_b * 1e9)) / 1e6 if fx.healthy() else None     # décalage Pi - B réellement utilisé pour cet ordre
         ok = fx.fire_at(due_b, lead_s=a.lead_ms / 1000)
         due_wall = int(due_b * 1e9) + (w0 - m0)
-        out.write(json.dumps({"i": i, "send_ns": due_wall, "ack_ns": due_wall, "kind": "down", "ok": ok}) + "\n")
+        out.write(json.dumps({"i": i, "send_ns": due_wall, "ack_ns": due_wall, "kind": "down", "ok": ok, "theta_ms": theta_ms, "due_b_ns": int(due_b * 1e9)}) + "\n")
         out.write(json.dumps({"i": i, "send_ns": due_wall + int(a.hold_ms * 1e6), "ack_ns": due_wall, "kind": "up", "ok": ok}) + "\n")
         due_list.append(due_b)
         t_next += (a.spacing_ms + random.uniform(0, 60)) / 1000
@@ -66,6 +67,9 @@ def main():
         print(f"exécution sur le Pi : retard sur l'échéance moy {statistics.mean(late):+.3f} ms, écart-type {statistics.stdev(late):.3f}, "
               f"min {min(late):+.3f}, max {max(late):+.3f} ; durée de l'injection {statistics.mean(inj):.3f} ms")
     print("fin :", fx.stats())
+    with open(a.out + ".sync", "w") as f:                    # échantillons bruts de synchronisation : (t4 ns, rtt ns, theta ns)
+        for t4, rtt, th in list(fx.samples):
+            f.write(json.dumps({"t4": t4, "rtt": rtt, "theta": th}) + "\n")
     fx.close()
 
 

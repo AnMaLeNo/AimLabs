@@ -116,6 +116,52 @@ Enregistrement de l'écran* et *Accessibilité* ; `sudo` sans mot de passe pour 
 exécute un script dans la session graphique (un seul Terminal « runner », jamais une fenêtre par tâche), `remote/mac_screenshot.sh` capture
 l'écran, `poc/view_check.py` vérifie la fenêtre (captures, touches, survie de B), `poc/pm_check.py` mesure l'activité par cœur.
 
+## Mode silent : le jeu ne publie rien, le tir passe par le Raspberry Pi
+
+`--mode=silent` : **aucun pont**, aucune image, aucun état, aucune commande ; le jeu ne réagit qu'à de vrais évènements d'entrée. Le joueur doit donc lui-même
+capturer l'image, décider, et **appuyer sur la touche de tir** : ici via le Pi, qui se fait passer pour un clavier Bluetooth auprès du PC.
+
+```
+ PC A (jeu --mode=silent)         machine B (Mac)                    Raspberry Pi 5                    PC A
+ ┌──────────┐ capture d'écran ┌───────────────────┐  UDP signé   ┌────────────────────┐  Bluetooth   ┌──────────┐
+ │ godot    │ ──────────────► │ sniper_b.py       │ ───────────► │ btkbd + fire_server│ ───────────► │ touche G │
+ │ (rien)   │  agent_a        │ YOLO + décision   │ « appuie à   │ exécute à l'instant│  HID clavier │ = tir    │
+ └──────────┘  --no-bridge    │ --fire-via pi:IP  │   l'instant T»│ T (horloge du Pi)  │              └──────────┘
+                              └───────────────────┘              └────────────────────┘
+```
+
+* **Jeu** : `--mode=silent` (force `--bridge=off` et le profil d'information « réel »), touche de tir configurable (`--fire-key=G`, ou bouton « Touche de tir » du menu Échap,
+  sauvegardée dans `user://settings.cfg`), qui s'ajoute au clic gauche dans l'action `fire`. *Le clic droit est l'action « viser » du jeu, pas le tir.*
+* **PC A** : `agent_a.py --no-bridge ...` (capture d'écran et envoi des images à B, rien d'autre).
+* **B** : `sniper_b.py --fire-via pi:HOTE[:PORT]` (réglages : `--pi-usage` touche HID, `--pi-lead-ms` avance Bluetooth, `--pi-return-ms` marge réseau B→Pi, `--pi-late-ms`
+  tolérance de retard, `--bias-ms`). B synchronise son horloge avec celle du Pi (méthode NTP, `pi_fire.py`) et demande « touche à l'instant T de l'horloge de B » :
+  le Pi l'exécute avec sa propre horloge, la gigue du réseau disparaît tant que l'ordre arrive avant l'échéance.
+* **Pi** (`remote/pi/`) : `fire_server.py` (UDP 7780, ~270 lignes) branché sur le relais existant `btkbd.py` (≈ 60 lignes ajoutées : fusion des touches injectées avec celles du clavier
+  relayé, keep-alive du lien, bascule en maître du lien, commandes de diagnostic). Sécurité : chaque paquet porte un HMAC-SHA256 (secret `/etc/btkbd/fire.json`, mode 0600 ;
+  côté B `~/.aimlabs/pi_fire.key`, jamais dans le dépôt), **liste blanche de touches** (par défaut la seule touche de tir), appui borné, anti-rejeu, annulation limitée aux ordres plus anciens.
+  Modifications du Pi, toutes réversibles : original sauvegardé dans `/opt/btkbd/btkbd.py.orig-20261024` ; `sudo rm /etc/btkbd/fire.json` désactive le serveur de tir ;
+  la connexion Wi-Fi `preconfigured` est fixée sur la bande 5 GHz (`sudo nmcli con modify preconfigured 802-11-wireless.band ""` pour revenir à l'automatique).
+* **Lancer une session complète** : `python remote/poc/live_pi.py --speed 36 --passes 30` (B, jeu, agent ; vérifie que la fenêtre du jeu a le focus clavier avant d'armer quoi que ce soit ;
+  rend les touches, l'erreur de timing mesurée par le jeu, `remote/poc/shot_timing.py`, et les mesures du Pi).
+
+### Ce qui a été mesuré (Pi 5, Intel AX200 du PC, Mac M5 ; détails : `tools/README.md`)
+
+| Maillon | Mesure |
+|---|---|
+| Exécution sur le Pi | à **+0,005 ms** de l'échéance (±0,002), injection 0,03 ms |
+| Bluetooth Pi → Windows, Pi maître du lien, Wi-Fi du Pi en 5 GHz, keep-alive | **médiane 2,9 à 3,9 ms**, 70 % des frappes entre 2 et 4 ms, queue jusqu'à ~12 ms (σ 2,3 ms) |
+| idem, Pi esclave du lien | 5,7 ms (étalement uniforme 2–12 ms, σ 2,6 ms) |
+| **Wi-Fi du Pi en 2,4 GHz** (canal 11) | 14 ms en moyenne, étalement 2–35 ms, σ 10 ms : la puce CYW43455 partage la radio entre Wi-Fi et Bluetooth |
+| **Lien inactif ≥ 3–6 s sans keep-alive** | la 1re frappe arrive **68 ms** plus tard (65–72 ms) ; un rapport HID de l'état courant toutes les 100 ms l'évite |
+| Réseau Mac (Wi-Fi) → Pi (Wi-Fi) | RTT 17,7 ms en moyenne, jusqu'à 99,5 ms, 3 % de pertes ; PC (Ethernet) → Pi (Wi-Fi) : pertes par rafales (0 à 57 %) |
+| Précision de tir de bout en bout (36 m/s, 30 passages, Wi-Fi/Wi-Fi) | 28/30 (Wi-Fi 5 GHz, bonne passe), biais +3,2 ms, σ 3,9 ms ; l'ancienne chaîne (agent A) : 30/30, σ 1,6 ms |
+
+**Limites actuelles et ce qui les lève.** Le créneau utilisable est court : à 36 m/s la cible traverse le champ capturé en ~50 ms, il reste ~20 ms entre la première détection fiable et le passage au
+réticule, et il doit contenir l'acheminement B → Pi **plus** l'avance Bluetooth (~3,5 ms). Avec un Wi-Fi lossy des deux côtés (marge réseau 6–10 ms), B n'émet un ordre que dans 12 à 20 passages sur 30 ;
+avec une marge plus courte, 20 à 40 % des ordres arrivent après leur échéance. **Un câble Ethernet sur le Pi** (et, mieux, sur le Mac) ramène l'acheminement à ~1–2 ms et libère la radio du Pi.
+Autre levier, plus radical : une liaison **USB filaire** (le Pi en périphérique HID, ~1 ms, gigue quasi nulle) à la place du Bluetooth. Sans Ethernet, **ne pas laisser le Pi basculer en 2,4 GHz**
+(il le fait de lui-même si la 5 GHz ne répond pas assez vite à une reconnexion : c'est arrivé pendant les tests).
+
 ## Outils de mesure (`poc/`)
 
 * `replay_agent.py` : rejoue des images enregistrées par `agent_a.py --record` vers B (même protocole, même cadence), sans jeu

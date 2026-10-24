@@ -69,3 +69,17 @@ Faits mesurés (Wi-Fi du Pi sur 5 GHz, Pi esclave du lien, mêmes protocoles) :
 * Le Wi-Fi du Pi perd des paquets par rafales (0 % puis 27 % de pertes sur deux essais de 100 ordres, 60 % de réponses manquantes pendant une synchronisation) : **un câble Ethernet sur le Pi est indispensable** pour un ordre de tir fiable.
 * Piège : `time.monotonic()` n'a que 15,6 ms de résolution sous Windows (Python ≤ 3.12) ; les horloges des outils utilisent `time.perf_counter_ns()`.
 * Piège de mesure : le rapport doit apparier les frappes **par le temps**, pas par l'ordre (une frappe perdue décalait tout et donnait des latences de 7 s), et attendre la fin de la sonde (son fichier est écrit à la fermeture).
+
+| Outil | Pourquoi il existe (le besoin) | Côté jeu ? |
+|---|---|---|
+| `remote/poc/live_pi.py` | **session complète en mode silent** (B, jeu `--mode=silent`, agent `--no-bridge`) avec une vérification que la fenêtre du jeu a le **focus clavier** avant d'armer (sinon l'ordre de tir taperait « g » dans une autre application) ; rend touches, erreur de timing et mesures du Pi | oui, probablement : un mode « benchmark silent » du jeu qui attend ses entrées et donne la fiche |
+| `remote/poc/shot_timing.py` | **précision de tir mesurée par le jeu** (vérité terrain indépendante de la chaîne) : `path_x × sens / vitesse` du 1er tir de chaque passage → biais et gigue de toute la chaîne ; sert à calibrer `--bias-ms` | oui : le jeu pourrait l'afficher lui-même dans sa fiche de benchmark |
+
+### Pièges et corrections de ce chantier (2026-10-24)
+
+* **Le Wi-Fi du Pi a rebasculé en 2,4 GHz tout seul** après une reconnexion locale (la 5 GHz n'a pas répondu assez vite) : toutes les mesures suivantes étaient dégradées (latence Bluetooth 13–16 ms, σ 7,5 ms au lieu de 3–4 ms, 4/30 touches au lieu de 28/30) jusqu'à ce que j'aie lu le journal de `wpa_supplicant`. Connexion fixée sur 5 GHz (`nmcli … 802-11-wireless.band a`) avec un minuteur systemd de rattrapage armé avant. À surveiller : `nmcli -t -f IN-USE,CHAN,FREQ dev wifi list | grep '^\*'`.
+* Le canal 5 GHz du Pi (116, 5580 MHz) est une bande **DFS** avec un signal faible (−67 dBm) : pertes par rafales. Un câble Ethernet sur le Pi est le vrai remède.
+* `pkill -f motif` dans une commande SSH tue le shell distant lui-même (le motif figure dans sa ligne de commande) → code 255 sans message. Séparer l'appel, ou écrire `[m]otif`.
+* `fire_server` : un ordre déjà en retard **remplaçait** l'ordre valide en attente, qui était alors perdu ; il est maintenant refusé sans le remplacer. L'annulation ne vise que les ordres plus anciens (numéro de séquence).
+* Le rapport de latence appariait par l'ordre (une frappe perdue décalait tout → latences de 7 s) ; il apparie maintenant par le temps et compte les pertes. Il faut aussi attendre la fin de la sonde (fichier écrit à la fermeture).
+* Les patchs de fichiers par script avec des `\n` dans des chaînes ont échoué en silence plusieurs fois ; l'outil d'édition est plus sûr pour ces cas.

@@ -188,6 +188,7 @@ def main(argv=None):
     ap.add_argument("--pi-hold-ms", type=float, default=25.0, help="durée d'appui de la touche")
     ap.add_argument("--pi-lead-ms", type=float, default=4.8, help="latence moyenne Pi -> Bluetooth -> jeu (mesurée : 4,8 ms) : on appuie ce temps plus tôt")
     ap.add_argument("--pi-return-ms", type=float, default=4.0, help="temps réservé au trajet B -> Pi (réseau) avant l'échéance")
+    ap.add_argument("--pi-late-ms", type=float, default=3.0, help="un ordre arrivé en retard de moins que cela tire tout de suite (plus tard : refusé, l'ordre en attente est conservé)")
     ap.add_argument("--warm", choices=["cpu", "ane", "none"], default="cpu", help="processus qui garde le Mac à pleine vitesse")
     ap.add_argument("--no-schedule", action="store_true", help="tir immédiat dès que c'est sûr (sans tir programmé)")
     ap.add_argument("--lag-ms", type=float, default=3.5, help="délai A→B (encodage + réseau) à ajouter au temps écoulé depuis la réception de l'image")
@@ -239,7 +240,7 @@ def main(argv=None):
     if via_pi:                                              # tir par le Raspberry Pi : ordre UDP signé -> Bluetooth HID -> touche de tir du jeu
         from pi_fire import PiFire
         host, _, port = a.fire_via[3:].partition(":")
-        fx = PiFire(host, int(port or 7780), usage=a.pi_usage, hold_ms=a.pi_hold_ms)
+        fx = PiFire(host, int(port or 7780), usage=a.pi_usage, hold_ms=a.pi_hold_ms, late_ms=a.pi_late_ms)
         if fx.start(wait_sync=15.0):
             print(f"sniper_b : tir par le Pi {host} (RTT {fx.rtt_best_ms():.2f} ms, touche HID {a.pi_usage}, avance {a.pi_lead_ms} ms)", flush=True)
         else:
@@ -263,7 +264,7 @@ def main(argv=None):
             def fire_at(fid, delay):
                 """`delay` = secondes après la CAPTURE de l'image ; dans l'horloge de B la capture a eu lieu lag_ms avant la réception (rx_last)."""
                 due_mono = rx_last - a.lag_ms / 1e3 + delay
-                return fx.fire_at(due_mono + (time.perf_counter() - time.monotonic()), lead_s=a.pi_lead_ms / 1e3)
+                return fx.fire_at(due_mono + (time.perf_counter() - time.monotonic()), lead_s=a.pi_lead_ms / 1e3, tag=fid)
 
             def fire_now(frame_id=None):
                 fx.cancel()                                 # un tir programmé encore en attente ne doit pas partir en plus (annulation envoyée AVANT :

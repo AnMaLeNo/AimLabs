@@ -168,6 +168,7 @@ class Hid:
         with self.lock:
             self.ctl, self.itr, self.peer = c, i, addr
         log("host connected:", addr)
+        threading.Thread(target=_become_master, args=(addr,), daemon=True).start()
         threading.Thread(target=self._reader, args=(c, i), daemon=True).start()
 
     def connect_out(self, addr):
@@ -250,6 +251,17 @@ class Hid:
 
 
 hid = Hid()
+
+
+def _become_master(addr):
+    """Take the MASTER role of the ACL link. As the slave (what a host-initiated connection gives us) a report waits for the host to poll us: keystrokes
+    reached Windows with a latency uniform over ~2-12 ms (median 5.7 ms); as the master we transmit at our next slot: median 3.5-3.9 ms, 70 % within 2-4 ms."""
+    time.sleep(0.3)
+    try:
+        subprocess.run(["hcitool", "sr", addr, "master"], capture_output=True, timeout=5)
+        log("role switch requested (master) for", addr)
+    except Exception as e:
+        log("role switch failed:", e)
 
 
 def paired_addrs():
@@ -643,7 +655,9 @@ def handle(cmd):
         relay.inject(int(cmd["usage"]), int(cmd.get("mods", 0)), bool(cmd.get("down", True)))
         return {}
     if c == "fire":    # fire server status and the Pi-side log of executed shots (monotonic ns)
-        return {"fire": fire.status() if fire else None, "log": list(fire.log)[-int(cmd.get("n", 20)):] if fire else []}
+        n_rx = int(cmd.get("rx", 0))
+        return {"fire": fire.status() if fire else None, "log": list(fire.log)[-int(cmd.get("n", 20)):] if fire else [],
+                "rx": list(fire.rx_log)[-n_rx:] if (fire and n_rx) else []}
     if c == "raw":  # [mod, k1..k6] hex, for debugging
         b = bytes.fromhex(cmd["hex"])
         hid.send_report(b[0], list(b[1:]))

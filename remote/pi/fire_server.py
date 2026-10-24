@@ -71,6 +71,7 @@ class FireServer:
         self.seen_set = set()
         self.stats = {"pings": 0, "fires": 0, "executed": 0, "late": 0, "no_host": 0, "denied": 0, "bad_mac": 0, "dup": 0, "cancelled": 0}
         self.log = collections.deque(maxlen=200)   # (due, t_pre, t_post, hold, usage, seq, tag) : mesures du Pi
+        self.rx_log = collections.deque(maxlen=4000)   # (t_rx, seq, tag, due, avance à l'arrivée) de chaque ordre programmé reçu
 
     # ------------------------------------------------------------------ réseau
     def start(self):
@@ -150,13 +151,22 @@ class FireServer:
         now = mono_ns()
         if due == 0:
             due = now
+        else:
+            self.rx_log.append((t_rx, seq, tag, due, due - t_rx))      # avance de l'ordre sur son échéance À L'ARRIVÉE (< 0 : arrivé en retard) : mesure du réseau B -> Pi
         if due > now + 2_000_000_000 or due < now - 1_000_000_000:       # trop lointain / trop ancien : refus
+            self.stats["late"] += 1
+            self._send(T_ACK, seq, P_ACK.pack(ST_LATE, due, 0, 0), addr)
+            return
+        tol_us = late_us or self.late_us
+        if due < now - tol_us * 1000:
+            # Déjà trop tard : ne REMPLACE PAS l'ordre en attente (un ordre plus ancien, encore valable, partirait à l'heure). B renvoie un ordre mis à jour
+            # à chaque image ; sur Wi-Fi certains arrivent après leur échéance et faisaient perdre le précédent.
             self.stats["late"] += 1
             self._send(T_ACK, seq, P_ACK.pack(ST_LATE, due, 0, 0), addr)
             return
         hold_ms = max(5, min(int(hold_ms), self.max_hold_ms))
         with self.cv:
-            self.pending = (due, hold_ms, usage, mods, seq, tag, late_us or self.late_us, addr)
+            self.pending = (due, hold_ms, usage, mods, seq, tag, tol_us, addr)
             self.cv.notify_all()
 
     # ------------------------------------------------------------ exécution
