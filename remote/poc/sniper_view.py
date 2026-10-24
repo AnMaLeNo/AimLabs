@@ -2,14 +2,15 @@
 
 Principe (chaque point existe pour que le debug ne coûte rien au chemin chaud de B) :
 
-  * la fenêtre vit dans un PROCESSUS SÉPARÉ, en priorité basse (macOS : QoS « utility » = cœurs d'efficacité) : ni GIL partagé,
-    ni cœur de performance volé au thread qui décide ;
+  * la fenêtre vit dans un PROCESSUS SÉPARÉ, en priorité basse (macOS : QoS « utility » + latence « tier 0 ») : pas de GIL partagé. Mesuré :
+    elle travaille surtout sur les cœurs d'efficacité, mais le compositeur de fenêtres de macOS, lui, travaille sur les cœurs rapides à chaque
+    rafraîchissement (≈ +0,03 ms sur B à 30 images/s : voir remote/README.md) ;
   * B ne fait que COPIER des octets en mémoire partagée (≈ 15 µs par instantané : image BGR d'origine 3 µs, sorties du
     réseau 8 µs, en-tête 0,5 µs), et seulement APRÈS avoir envoyé sa commande ;
-  * un enregistrement de télémétrie de 64 octets par image (1 µs) ; un instantané complet seulement quand la fenêtre en
-    réclame un (≤ `--view-fps` par seconde, protocole demande/accusé : B n'écrit jamais pendant que la fenêtre lit) ;
-  * un instantané « événement » (tir) hors protocole : il garde l'image qui a décidé le tir, protégée par un compteur de
-    version (la fenêtre relit si c'est incohérent) ;
+  * un enregistrement de télémétrie de 64 octets par image (1 µs) ; un instantané complet toutes les 1/(2 × `--view-fps`) s, dans
+    deux tampons alternés (jamais celui que la fenêtre vient de recevoir) : pas de poignée de main avec la fenêtre, donc rien qui
+    dépende de ses minuteries ; un compteur de version détecte (et fait relire) une lecture déchirée ;
+  * un instantané « événement » (tir) à part : il garde l'image qui a décidé le tir ;
   * si la fenêtre se ferme ou plante, B continue sans rien changer.
 
 Disposition de la mémoire partagée : en-tête (compteurs, méta JSON) | anneau de télémétrie | instantané régulier | instantané
@@ -103,9 +104,10 @@ class Layout:
         self.o_img = o; o += _a64(side * side * 3)
         self.o_protos = o; o += _a64(NCOEF * mh * mw * 4)
         self.slot_size = o + 64                              # +64 : compteur de fin (seq1) en dernier
-        self.slot0 = self.ring + RING * REC.size
+        self.slot0 = self.ring + RING * REC.size             # deux tampons alternés (instantané régulier)
         self.slot1 = self.slot0 + self.slot_size
-        self.total = self.slot1 + self.slot_size
+        self.slot2 = self.slot1 + self.slot_size             # l'image qui a décidé un tir
+        self.total = self.slot2 + self.slot_size
 
 
 class Slot:
@@ -124,12 +126,26 @@ class Slot:
         self.coefs = self.head = self.img = self.protos = None
 
 
-def set_low_priority() -> None:
-    """La fenêtre ne doit jamais disputer un cœur de performance à B."""
+QOS = {"background": 0x09, "utility": 0x11, "default": 0x15, "initiated": 0x19}
+
+
+def set_low_priority(qos: str = "utility") -> None:
+    """La fenêtre ne doit jamais disputer un cœur de performance à B.
+
+    macOS règle deux choses séparément : la classe de débit (QoS : sur quels cœurs, avec quelle priorité) et la classe de LATENCE
+    (marge de coalescence des minuteries). La QoS « utility » seule fait dépasser `sleep(10 ms)` de 73 ms (mesuré sur le M5) ; avec la
+    latence « tier 0 » (THREAD_LATENCY_QOS_POLICY) le dépassement retombe à 2 ms, comme en QoS « default », tout en restant « utility »
+    pour le placement sur les cœurs. Les autres QoS ne touchent pas à la latence."""
     try:
         if sys.platform == "darwin":
             import ctypes
-            ctypes.CDLL("/usr/lib/libSystem.B.dylib").pthread_set_qos_class_self_np(0x11, 0)   # QOS_CLASS_UTILITY
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            libc.pthread_set_qos_class_self_np(QOS[qos], 0)
+            if qos in ("utility", "background"):
+                libc.mach_thread_self.restype = ctypes.c_uint32
+                libc.thread_policy_set.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
+                tier = ctypes.c_int(0xFF0001)                                              # LATENCY_QOS_TIER_0
+                libc.thread_policy_set(libc.mach_thread_self(), 7, ctypes.byref(tier), 1)  # THREAD_LATENCY_QOS_POLICY
         elif sys.platform == "win32":
             import ctypes
             ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x4000)   # BELOW_NORMAL
@@ -139,13 +155,12 @@ def set_low_priority() -> None:
         pass
 
 
-# ================================================================================================ producteur (dans B)
 class ViewTx:
     """Côté B. Tout est conçu pour ne rien coûter : voir l'en-tête du module. `frame()` est appelé une fois par image,
     APRÈS l'envoi de la commande."""
 
     def __init__(self, side, n_anchors, protos_shape, meta=None, fps=30.0, scale=3, snap_dir="", snap_every=0.0,
-                 headless=False, linger=5.0, log="", spawn=True):
+                 headless=False, linger=5.0, log="", spawn=True, qos="utility"):
         from multiprocessing import shared_memory
         self.L = Layout(side, n_anchors, protos_shape[1], protos_shape[2])
         self.shm = shared_memory.SharedMemory(create=True, size=self.L.total)
@@ -158,14 +173,18 @@ class ViewTx:
         self.buf[META_OFF:META_OFF + len(mj)] = mj
         self.h[H_METALEN] = len(mj)
         self.h[H_PRODUCER] = 1
-        self.slots = (Slot(self.buf, self.L.slot0, self.L), Slot(self.buf, self.L.slot1, self.L))
+        self.slots = (Slot(self.buf, self.L.slot0, self.L), Slot(self.buf, self.L.slot1, self.L), Slot(self.buf, self.L.slot2, self.L))
         self.head_n = 0
-        self.pub = 0
+        self.pub = 0                                          # instantanés réguliers terminés ; le dernier est dans slots[(pub - 1) & 1]
         self.ev_pub = 0
+        self.seq = 0                                          # compteur de version, commun à tous les écrits
         self.t_ev = -1e9
+        self.t_snap = -1e9
+        self.idle_n, self.reaped = 0, False
+        self.period = 0.5 / fps                               # un instantané toutes les 1/(2 fps) s : la fenêtre en lit toujours un de moins de 17 ms (à 30 fps)
         self.proc = None
         self.opts = dict(fps=fps, scale=scale, snap_dir=snap_dir, snap_every=snap_every, headless=headless, linger=linger, log=log,
-                         parent=os.getpid())
+                         parent=os.getpid(), qos=qos)
         if spawn:
             import multiprocessing as mp
             self.proc = mp.get_context("spawn").Process(target=viewer_main, args=(self.shm.name, self.opts), daemon=False)
@@ -176,8 +195,8 @@ class ViewTx:
         return self.h[H_VIEWER] == 1
 
     def want(self) -> bool:
-        """La fenêtre a consommé le dernier instantané et en réclame un nouveau."""
-        return self.h[H_VIEWER] == 1 and self.h[H_ACK] == self.pub
+        """Un instantané complet est-il dû ? (la fenêtre est ouverte et le dernier date de plus d'une période)"""
+        return self.h[H_VIEWER] == 1 and time.monotonic() - self.t_snap >= self.period
 
     # ---- une image
     def frame(self, *, fid, rx, flags, gap_ms, inf_ms, post_ms, proc_ms, dec_ms, nbytes, state, rmask,
@@ -186,6 +205,11 @@ class ViewTx:
               geom=(0, 0, 0, 0, 0, 0, 0)):
         h = self.h
         if h[H_VIEWER] != 1:
+            if self.proc is not None and not self.reaped:
+                self.idle_n += 1
+                if self.idle_n == 256:                         # fenêtre fermée : on récolte le processus (sinon il reste zombie jusqu'à la fin de B)
+                    self.proc.join(0)
+                    self.reaped = True
             return
         if (self.head_n & 1023) == 1023 and self.proc is not None and not self.proc.is_alive():
             h[H_VIEWER] = 0                                   # fenêtre tuée sans prévenir : on cesse de publier
@@ -203,18 +227,23 @@ class ViewTx:
             ev = False                                        # une rafale de tirs programmés : un instantané tous les 80 ms
         if ev:
             self.t_ev = rx
-            self._snap(self.slots[1], 1, fid, flags, rx, locals())
+            self._snap(self.slots[2], 1, fid, flags, rx, locals())
             self.ev_pub += 1
             h[H_EVPUB] = self.ev_pub
-        elif h[H_ACK] == self.pub:
+        elif rx - self.t_snap >= self.period:
+            # B publie à son rythme, dans le tampon qui n'est PAS le dernier terminé : aucune poignée de main avec la fenêtre
+            # (la fenêtre ne peut pas être lue pendant l'écriture que si elle reste figée plus de deux périodes : le compteur de
+            # version le détecte et elle relit)
+            self.t_snap = rx
+            self._snap(self.slots[self.pub & 1], 0, fid, flags, rx, locals())
             self.pub += 1
-            self._snap(self.slots[0], 0, fid, flags, rx, locals())
             h[H_PUB] = self.pub
 
     def _snap(self, s: Slot, kind, fid, flags, rx, a):
         """Écrit un instantané ; `a` = variables locales de frame(). Compteur de début, données, compteur de fin."""
         buf, L = self.buf, self.L
-        seq = (self.pub if kind == 0 else self.ev_pub) + 1
+        self.seq += 1
+        seq = self.seq
         boxes, sel, ext, vel, track = a["boxes"], a["sel"], a["ext"], a["vel"], a["track"]
         nb = min(len(boxes), MAXB)
         w, hh, x0, y0, cw, ch, codec = a["geom"]
@@ -276,6 +305,15 @@ def ascii_fold(s: str) -> str:
 
 def put(cv2, img, s, x, y, color=WHITE, scale=0.45, thick=1):
     cv2.putText(img, ascii_fold(s), (int(x), int(y)), cv2.FONT_HERSHEY_SIMPLEX, scale, color, thick, cv2.LINE_AA)
+
+
+def banner(cv2, img, text, x, y, color, scale=0.7, thick=2):
+    """Texte sur fond sombre : lisible sur le ciel clair de la scène."""
+    (w, h), _ = cv2.getTextSize(ascii_fold(text), cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    x0, y0, x1, y1 = max(x - 6, 0), max(y - h - 6, 0), min(x + w + 6, img.shape[1]), min(y + 6, img.shape[0])
+    roi = img[y0:y1, x0:x1]
+    roi[:] = (roi * 0.25).astype(np.uint8)
+    put(cv2, img, text, x, y, color, scale, thick)
 
 
 def pct(a, q):
@@ -557,8 +595,9 @@ def render(st, W, H, S, opts):
         band = canvas[25:45, 11:10 + img_px - 1]
         band[:] = (band * 0.3).astype(np.uint8)               # lisible sur le ciel clair
         age = (now - snap["rx"]) * 1e3
+        age_txt = f"tir il y a {age / 1000:.1f} s" if st.get("review") else f"vue il y a {age:.0f} ms"
         put(cv2, canvas, f"#{snap['fid']}  {side}x{side} <- carre {snap['cw']}x{snap['ch']} @({snap['x0']},{snap['y0']}) de {snap['w']}x{snap['h']}  "
-                         f"{'JPEG' if snap['codec'] == 1 else 'brut'} {snap['nbytes'] / 1000:.1f} Ko  decode {snap['dec_ms']:.2f} ms  vue il y a {age:.0f} ms",
+                         f"{'JPEG' if snap['codec'] == 1 else 'brut'} {snap['nbytes'] / 1000:.1f} Ko  decode {snap['dec_ms']:.2f} ms  {age_txt}",
             14, 38, WHITE, 0.4)
     y = 24
     if snap:
@@ -576,6 +615,8 @@ def render(st, W, H, S, opts):
             badge, col = "ARME - aucune cible", CYAN
     else:
         badge, col = "-", GRAY
+    if st.get("review"):                                   # l'image affichée est une ancienne décision, pas l'état présent
+        badge, col = f"REVUE du tir #{st['review']} (touche 0 : direct)", YELLOW
     cv2.rectangle(canvas, (x_r, y), (x_r + wr, y + 26), PANEL, -1)
     cv2.rectangle(canvas, (x_r, y), (x_r + 6, y + 26), col, -1)
     put(cv2, canvas, badge, x_r + 14, y + 18, col, 0.6, 2)
@@ -589,13 +630,13 @@ def render(st, W, H, S, opts):
     canvas[y0:y0 + c["img"].shape[0], x_r:x_r + wr] = c["img"]
     put(cv2, canvas, "q quitter  espace pause  s capture  m masques  c candidats  i lissage  1-4 revoir un tir  0 direct", 10, H - 8, DIM, 0.38)
     if st.get("review"):
-        put(cv2, canvas, f"REVUE : image #{st['review']} qui a decide le tir (0 = retour au direct)", 20, 64, YELLOW, 0.6, 2)
+        banner(cv2, canvas, f"REVUE : image #{st['review']} qui a decide le tir (0 = retour au direct)", 20, 70, YELLOW, 0.6, 2)
     if st["paused"]:
-        put(cv2, canvas, "PAUSE", 20, 60, YELLOW, 0.9, 2)
+        banner(cv2, canvas, "PAUSE (espace : reprendre)", 20, 100, YELLOW, 0.8, 2)
     if st["gone"]:
-        put(cv2, canvas, "B arrete", 20, 90, RED, 0.9, 2)
+        banner(cv2, canvas, "B arrete", 20, 130, RED, 0.9, 2)
     elif snap is not None and now - snap["rx"] > 1.5 and not st["paused"] and not st.get("review"):
-        put(cv2, canvas, "plus d'images recues", 20, 90, RED, 0.7, 2)
+        banner(cv2, canvas, "plus d'images recues", 20, 130, RED, 0.7, 2)
     return canvas
 
 
@@ -609,7 +650,7 @@ class Viewer:
         assert self.h[H_MAGIC] == MAGIC and self.h[H_VERSION] == VERSION, "mémoire partagée incompatible"
         side, n, mh, mw = self.h[H_SIDE], self.h[H_N], self.h[H_MH], self.h[H_MW]
         self.L = Layout(side, n, mh, mw)
-        self.slots = (Slot(self.buf, self.L.slot0, self.L), Slot(self.buf, self.L.slot1, self.L))
+        self.slots = (Slot(self.buf, self.L.slot0, self.L), Slot(self.buf, self.L.slot1, self.L), Slot(self.buf, self.L.slot2, self.L))
         self.ring = np.ndarray((RING,), REC_DTYPE, buffer=self.buf, offset=self.L.ring)
         self.meta = json.loads(bytes(self.buf[META_OFF:META_OFF + self.h[H_METALEN]]) or b"{}")
         self.opts = opts
@@ -624,8 +665,6 @@ class Viewer:
         self.hist = np.zeros(0, REC_DTYPE)
         self.snap = None
         self.last_pub = 0
-        self.ack_pending = None
-        self.t_next_ack = 0.0
         self.last_ev = 0
         self.events = []
         self.t_last_sched_ev = -1e9
@@ -678,16 +717,22 @@ class Viewer:
         return d
 
     def take_snapshot(self):
-        """Lit l'instantané publié, s'il y en a un nouveau. L'accusé de réception part plus tard (voir run)."""
+        """Lit le dernier instantané régulier terminé, s'il y en a un nouveau (renvoie True). Lecture cohérente : si B réécrit ce
+        tampon pendant la lecture (la fenêtre est restée figée plus de deux périodes), le compteur de version le détecte : on relit."""
         pub = self.h[H_PUB]
         if pub == self.last_pub:
-            return
-        d = self.read_slot(self.slots[0])
-        if d is not None and not self.paused:
+            return False
+        for _ in range(3):
+            d = self.read_slot(self.slots[(self.h[H_PUB] - 1) & 1])
+            if d is not None:
+                break
+        else:
+            return False
+        if not self.paused:
             self.snap = d
         self.n_snap += 1
         self.last_pub = pub
-        self.ack_pending = pub
+        return True
 
     def poll_events(self, now):
         ev = self.h[H_EVPUB]
@@ -695,7 +740,7 @@ class Viewer:
             return
         d = None
         for _ in range(3):
-            d = self.read_slot(self.slots[1])
+            d = self.read_slot(self.slots[2])
             if d is not None:
                 break
         self.last_ev = ev
@@ -733,9 +778,9 @@ class Viewer:
                     gone=gone, fps_view=self.fps_view, render_ms=self.render_ms, snap_hz=self.snap_hz, bg=self.bg, cache=self.cache)
 
     def run(self):
-        """Deux échéances par période P = 1/fps : l'ACCUSÉ part `lead` avant le rendu suivant (le producteur écrit alors un instantané
-        frais, prêt à temps), puis le RENDU lit cet instantané. Entre deux, la boucle dort dans waitKey : ~60 réveils par seconde
-        au lieu de 500 (un sondage à 2 ms faisait consommer 30 % d'un cœur à la fenêtre)."""
+        """Un rendu toutes les P = 1/fps s : il lit le dernier instantané terminé (B en publie un toutes les P/2). Entre deux rendus la
+        boucle dort (time.sleep) puis vide les événements de la fenêtre (pollKey, non bloquant) : sous Cocoa waitKey(n) a un plancher
+        de 16-20 ms, et la classe de QoS « utility » ajoute 35-65 ms aux minuteries (mesuré)."""
         import cv2
         headless = self.opts.get("headless")
         title = "AimLabs - vue debug de sniper_b"
@@ -743,13 +788,16 @@ class Viewer:
             cv2.namedWindow(title, cv2.WINDOW_AUTOSIZE)
         self.h[H_VIEWER] = 1
         P = 1.0 / self.opts["fps"]
-        lead = min(0.012, P / 2)
         now = time.monotonic()
-        next_render, next_ack = now, 0.0
+        next_render = now
+        has_pollkey = hasattr(cv2, "pollKey")
+        poll_cost, t_poll = 0.016, 0.0
         t_fps, n_fps, n_snap0, t_snap_png, t_gone, shown = now, 0, 0, 0.0, None, 0
         ppid = self.opts.get("parent")
         orphan = False
         dirty, t_last_render = True, 0.0
+        prof = os.environ.get("AIMLABS_VIEW_PROF") == "1"      # diagnostic : où part le temps de la fenêtre (imshow, waitKey, réveils)
+        pf = dict(loops=0, imshow=0.0, imshow_n=0, wk_over=0.0, wk_n=0, t=time.monotonic(), snaps0=0, poll=0.0, gap_max=0.0, last_r=0.0, gap_sum=0.0, gap_n=0)
         try:
             while True:
                 now = time.monotonic()
@@ -773,6 +821,12 @@ class Viewer:
                     self.last_canvas = canvas
                     self.render_ms = 0.9 * self.render_ms + 0.1 * (time.perf_counter() - t0) * 1e3
                     n_fps += 1
+                    if pf["last_r"]:
+                        gap = now - pf["last_r"]
+                        pf["gap_sum"] += gap
+                        pf["gap_n"] += 1
+                        pf["gap_max"] = max(pf["gap_max"], gap)
+                    pf["last_r"] = now
                     if now - t_fps >= 1.0:
                         self.fps_view, self.snap_hz = n_fps / (now - t_fps), (self.n_snap - n_snap0) / (now - t_fps)
                         n_fps, n_snap0, t_fps = 0, self.n_snap, now
@@ -781,23 +835,47 @@ class Viewer:
                         self.save_png("view", canvas)
                         t_snap_png = now
                     if not headless:
+                        t_im = time.perf_counter()
                         cv2.imshow(title, canvas)
+                        pf["imshow"] += time.perf_counter() - t_im
+                        pf["imshow_n"] += 1
                         shown += 1
                         if shown == 5:
                             print(f"vue : fenêtre ouverte (visible={cv2.getWindowProperty(title, cv2.WND_PROP_VISIBLE)}), {self.W}x{self.H}", flush=True)
                 if now >= next_render:
                     next_render = max(next_render + P, time.monotonic() + P / 2)   # échéance suivante, rendu fait ou non ; en retard : on ne rattrape pas
-                    next_ack = next_render - lead
-                if self.ack_pending is not None and time.monotonic() >= next_ack:
-                    self.h[H_ACK] = self.ack_pending
-                    self.ack_pending = None
-                wake = next_render if self.ack_pending is None else min(next_render, next_ack)
-                wait_ms = max(1, int((wake - time.monotonic()) * 1000))
+                wake = next_render
+                # cv2.pollKey() n'est PAS non bloquant sous Cocoa : il fait tourner la boucle d'événements ~15 ms (mesuré). On s'en sert comme
+                # temps d'attente : on dort seulement le complément, et pollKey nous amène à l'échéance. S'il reste moins que son coût, on le
+                # saute (sauf si les événements de la fenêtre n'ont pas été traités depuis 100 ms).
+                slack = wake - time.monotonic()
+                t_wk = time.perf_counter()
                 if headless:
-                    time.sleep(wait_ms / 1000)
+                    time.sleep(max(0.0005, slack))
                     k = 255
+                elif slack > poll_cost + 0.001:
+                    time.sleep(slack - poll_cost)
+                    t_pk = time.perf_counter()
+                    k = (cv2.pollKey() if has_pollkey else cv2.waitKey(1)) & 0xFF
+                    poll_cost = 0.8 * poll_cost + 0.2 * (time.perf_counter() - t_pk)
+                    t_poll = time.monotonic()
+                elif time.monotonic() - t_poll > 0.1:
+                    t_pk = time.perf_counter()
+                    k = (cv2.pollKey() if has_pollkey else cv2.waitKey(1)) & 0xFF
+                    poll_cost = 0.8 * poll_cost + 0.2 * (time.perf_counter() - t_pk)
+                    t_poll = time.monotonic()
                 else:
-                    k = cv2.waitKey(wait_ms) & 0xFF
+                    time.sleep(max(0.0005, slack))
+                    k = 255
+                pf["wk_over"] += (time.perf_counter() - t_wk - max(slack, 0)) * 1e3
+                pf["wk_n"] += 1
+                pf["loops"] += 1
+                if prof and time.monotonic() - pf["t"] >= 2.0:
+                    dt = time.monotonic() - pf["t"]
+                    print(f"[vue prof] réveils {pf['loops'] / dt:.0f}/s · rendus {pf['imshow_n'] / dt:.0f}/s · imshow {pf['imshow'] / max(pf['imshow_n'], 1) * 1e3:.1f} ms · "
+                          f"dépassement du sommeil {pf['wk_over'] / max(pf['wk_n'], 1):.1f} ms · pollKey {poll_cost * 1e3:.1f} ms · écart entre rendus "
+                          f"{pf['gap_sum'] / max(pf['gap_n'], 1) * 1e3:.1f} ms (max {pf['gap_max'] * 1e3:.0f}) · instantanés {(self.n_snap - pf['snaps0']) / dt:.0f}/s · rendu {self.render_ms:.1f} ms", flush=True)
+                    pf.update(loops=0, imshow=0.0, imshow_n=0, wk_over=0.0, wk_n=0, t=time.monotonic(), snaps0=self.n_snap, poll=0.0, gap_max=0.0, gap_sum=0.0, gap_n=0)
                 if k in (ord("q"), 27):
                     break
                 dirty = dirty or k != 255 and k != 0xFF
@@ -817,11 +895,16 @@ class Viewer:
                     print("vue : fenêtre fermée", flush=True)
                     break
         finally:
+            t_exit = time.monotonic()
             self.h[H_VIEWER] = 0
             if self.log:
                 self.log.close()
             if not headless:
                 cv2.destroyAllWindows()
+                for _ in range(3):                              # sous Cocoa la fenêtre n'est vraiment retirée qu'en vidant la boucle d'événements
+                    cv2.pollKey()
+            if os.environ.get("AIMLABS_VIEW_PROF") == "1":
+                print(f"[vue prof] arrêt : fenêtres détruites en {(time.monotonic() - t_exit) * 1e3:.0f} ms", flush=True)
             for sl in self.slots:
                 sl.release()
             self.ring = None
@@ -836,7 +919,7 @@ class Viewer:
 
 
 def viewer_main(name, opts):
-    set_low_priority()
+    set_low_priority(opts.get("qos", "utility"))
     Viewer(name, opts).run()
 
 

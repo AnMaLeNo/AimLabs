@@ -66,43 +66,55 @@ Une fenêtre sur la machine B montre **ce que l'IA reçoit, détecte et décide*
 les boîtes (les gardées par B, plus les candidats faibles en gris), masques de segmentation, cible choisie, zone de tir, ligne
 du masque lue au niveau du réticule, vitesse mesurée et position prédite au moment du tir, suivi, état de la décision
 (armé / verrouillé / refroidissement / tir programmé dans X ms), latences (inférence, réception→commande, écart entre images,
-images perdues), raisons pour lesquelles B ne tire pas, et les 4 dernières images qui ont décidé un tir (touches `1`–`4` pour
-les revoir en grand, `0` pour le direct ; `espace` pause, `s` capture, `m` masques, `c` candidats, `i` lissage, `q` quitter).
+images perdues), raisons pour lesquelles B ne tire pas, et les 4 dernières images qui ont décidé un tir.
+Touches : `1`–`4` revoir en grand l'image d'un tir, `0` direct, `espace` pause, `s` capture, `m` masques, `c` candidats, `i` lissage, `q` quitter.
 
 ```
 AIMLABS_AUTOSTART=1 venv/bin/python remote/poc/sniper_b.py --connect listen:7777 --model algos/yolo11n-seg_256.mlpackage --view
 ```
 
-Options : `--view-fps` (30), `--view-scale` (3), `--view-headless` + `--view-snap DIR` (PNG sans écran, pour tester à distance),
-`--view-log fichier.csv` (télémétrie de chaque image), `--view-linger`. Désarmé, la vue montre quand même l'image et les
-détections (à la cadence de la fenêtre seulement). Sans `--view`, aucun code de debug ne tourne dans la boucle de B.
+Options : `--view-fps` (30), `--view-scale` (3), `--view-qos` (utility), `--view-headless` + `--view-snap DIR` (PNG sans écran),
+`--view-log fichier.csv` (télémétrie de chaque image), `--view-linger`. Désarmé, la vue montre quand même l'image et les détections.
+Sans `--view`, aucun code de debug ne tourne dans la boucle de B. La fenêtre (1442×814) tient sur un écran de 1470×956 ; `--view-scale 2` sinon.
 
-**Pourquoi il ne ralentit pas B** (`sniper_view.py`) : la fenêtre est un *processus séparé* en priorité basse (macOS : QoS
-« utility », donc cœurs d'efficacité) ; B ne fait que copier des octets en mémoire partagée, *après* avoir envoyé sa commande
-(≈ 7 µs par image : un enregistrement de télémétrie de 64 octets, et un instantané complet — image BGR d'origine, sorties du
-réseau — seulement quand la fenêtre en réclame un, ≤ 30/s, protocole demande/accusé : B n'écrit jamais pendant que la fenêtre
-lit). L'image décisive d'un tir est conservée à part. Si la fenêtre se ferme ou meurt, B continue ; si B est tué, la fenêtre
-s'arrête et supprime la mémoire partagée. Le rendu coûte 1,6 ms sur le M5 (panneau de droite recalculé à 8 Hz seulement).
+**Architecture** (`sniper_view.py`) : la fenêtre est un *processus séparé* ; B ne fait que copier des octets en mémoire partagée,
+*après* avoir envoyé sa commande : un enregistrement de télémétrie de 64 octets par image, et un instantané complet (image BGR
+d'origine, sorties du réseau) toutes les 1/(2 × fps) s dans deux tampons alternés — pas de poignée de main avec la fenêtre, donc
+rien qui dépende de ses minuteries ; un compteur de version détecte une lecture déchirée. L'image qui a décidé un tir est conservée
+à part. Si la fenêtre se ferme ou meurt, B continue ; si B est tué, la fenêtre s'arrête et supprime la mémoire partagée.
 
-**Coût mesuré** (M5, même session de jeu rejouée, 4 tours entrelacés de 45 s ; `ab_bench.py`) : réception→commande de B
+**Ce qui a été mesuré sur le M5** (la vraie fenêtre, vue par captures d'écran, `view_check.py`) :
+* Cadence réelle : 30 rendus/s, 33,3 ms entre rendus (max 36), un instantané frais par rendu, rendu 1,3 ms + `imshow` 0,8 ms.
+  Pièges de macOS trouvés en chemin : `cv2.waitKey` *et* `cv2.pollKey` bloquent ≈ 15 ms (le programme s'en sert comme temps d'attente) ;
+  la QoS « utility » seule fait dépasser `sleep(10 ms)` de 73 ms (14 images/s au lieu de 30) — la *latence* « tier 0 »
+  (`THREAD_LATENCY_QOS_POLICY`) la ramène à 2 ms sans changer la classe de débit.
+* **Coût pour B** (réception→commande, même session rejouée, tours entrelacés, `ab_bench.py`) :
 
-| Configuration | réception→commande | inférence | CPU de la vue |
-|---|---|---|---|
-| ancien `sniper_b` (avant ce travail) | 0,972 ms | 0,931 ms | – |
-| `sniper_b` courant, sans `--view` | 0,570–0,585 ms | 0,525–0,540 ms | – |
-| `--view`, sans fenêtre (`--view-headless`) | 0,572 ms | 0,531 ms | 5 % d'un cœur |
-| `--view`, fenêtre réelle 30 images/s | 0,589–0,600 ms | 0,538 ms | 25 % |
-| `--view`, fenêtre réelle 15 images/s | 0,591 ms | 0,530 ms | 17 % |
+| Configuration | réception→commande | écart à « sans vue » |
+|---|---|---|
+| ancien `sniper_b` (avant ce travail) | 0,972 ms | – |
+| `sniper_b` courant, sans `--view` | 0,567 ms | 0 |
+| `--view` sans fenêtre (`--view-headless`) | 0,572 ms | indiscernable |
+| fenêtre à 15 images/s | 0,580 ms | +0,013 ms |
+| fenêtre à 20 images/s | 0,585 ms | +0,019 ms |
+| fenêtre à 30 images/s (défaut) | 0,597 ms | +0,030 ms |
 
-La vue elle-même ne coûte rien mesurable (7 µs sur le thread de décision ; sans fenêtre, aucune différence avec le mode normal).
-Une **fenêtre affichée** ajoute ≈ 0,01–0,02 ms (2–3 % de B, ≈ 0,2 % de la chaîne de ≈ 7 ms) quels que soient la cadence et
-l'agrandissement : c'est la présence d'une fenêtre à l'écran (macOS), pas le rendu. En direct (jeu réel, 30 traversées) le taux de
-touches ne bouge pas : 36 m/s, 27 et 30/30 sans vue, 30 et 30/30 avec ; 48 m/s, 23 et 30/30 sans vue, 29 et 29/30 avec (bruit ±3).
-`--view-fps 15` allège encore la charge ; ne pas laisser la fenêtre au premier plan d'une machine déjà chargée.
+  Le coût de la fenêtre est proportionnel à sa cadence (≈ 1 µs par image affichée), soit ≈ 0,3 % de la chaîne complète (≈ 7 ms) à 30
+  images/s. Ce n'est ni le GPU de B (`--units CPU_AND_NE` ne change rien), ni la classe de priorité du processus (« utility » +
+  latence, « default » et « background » donnent la même latence). `powermetrics` montre où va le travail : le processus de la fenêtre
+  prend ≈ 0,24 cœur sur les cœurs d'efficacité, **mais** les cœurs « Super » (ceux de B) gagnent ≈ 0,22 cœur et la puissance GPU passe
+  de 1 à 17 mW : c'est le compositeur de fenêtres de macOS qui travaille à chaque rafraîchissement, sur les cœurs rapides, quoi
+  qu'on demande au processus. On ne peut donc pas le déplacer, seulement le réduire (`--view-fps 15`).
+* En direct avec le vrai jeu (30 traversées) le taux de touches ne change pas : 36 m/s, 27 et 30/30 sans vue, 30 et 30/30 avec ;
+  48 m/s, 23 et 30/30 sans vue, 29 et 29/30 avec (bruit ±3).
 
 Le gain « hors debug » vient d'une correction : `Image.fromarray` de la vue RGB renversée de `cv2.imdecode(...)[:, :, ::-1]`
-coûtait 496 µs par image ; `Detector` convertit maintenant l'image BGR d'origine (34 µs, pixels identiques) : B passe de
-0,97 à 0,58 ms.
+coûtait 496 µs par image ; `Detector` convertit maintenant l'image BGR d'origine (34 µs, pixels identiques) : B passe de 0,97 à 0,57 ms.
+
+**Prérequis sur le Mac pour tester la fenêtre à distance** (une fois) : Terminal autorisé dans *Confidentialité et sécurité →
+Enregistrement de l'écran* et *Accessibilité* ; `sudo` sans mot de passe pour `/usr/bin/powermetrics` (optionnel). `remote/mac_job.sh`
+exécute un script dans la session graphique (un seul Terminal « runner », jamais une fenêtre par tâche), `remote/mac_screenshot.sh` capture
+l'écran, `poc/view_check.py` vérifie la fenêtre (captures, touches, survie de B), `poc/pm_check.py` mesure l'activité par cœur.
 
 ## Outils de mesure (`poc/`)
 
@@ -111,7 +123,8 @@ coûtait 496 µs par image ; `Detector` convertit maintenant l'image BGR d'origi
 * `ab_bench.py` : banc A/B de B sur le Mac (configurations entrelacées sur plusieurs tours, statistiques de B, CPU par processus).
 * `live_bench.py` : session de jeu complète (B sur le Mac, jeu, agent, nettoyage) : touches sur N traversées + statistiques de B, pour
   des configurations de `ab_bench.py` (ex. avec / sans `--view`).
-* `sync_mac.sh` : copie `remote/`, `sdk/python` et `algos/*.py` vers le Mac.
+* `sync_mac.sh` : copie `remote/`, `sdk/python` et `algos/*.py` vers le Mac. Les outils trouvent le Mac seuls : adresse Tailscale (fixe), dernière IP du réseau
+  local, puis nom Bonjour (le `.local` ne se résout pas toujours depuis Windows) ; `MAC=utilisateur@hôte` force le choix.
 
 * `latency_probe.py` : renvoie un `mark` par image, sans inférence → coût pur du transport.
 * `net_echo.py` : RTT réseau seul TCP/UDP selon la taille des messages (sans capture ni inférence).

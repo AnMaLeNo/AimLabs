@@ -2,10 +2,10 @@
 tours (la dérive thermique ou le bruit de la machine ne favorise donc aucune), statistiques de B + CPU consommé par chaque processus.
 
     python ab_bench.py remote/recordings/live_36ms_30pass.bin --rounds 3 --seconds 45 --configs old,off,view-headless
-    python ab_bench.py REC --configs view-gui                       # fenêtre réelle : lancée via Terminal (session graphique)
+    python ab_bench.py REC --configs view-gui                       # fenêtre réelle : lancée dans la session graphique par remote/mac_job.sh
 
 Configurations : `old` (sniper_b du dernier commit, dans ~/aimlabs-remote/old sur le Mac : `git archive HEAD remote/poc sdk/python`),
-`off` (code courant, sans --view), `view-headless` (processus de vue qui rend sans fenêtre), `view-gui` (fenêtre réelle),
+`off` (code courant, sans --view), `view-headless` (processus de vue qui rend sans fenêtre), `view-gui` (fenêtre réelle, via remote/mac_job.sh),
 `view-gui60` (idem à 60 images/s). Sortie : tableau + JSON dans bench_results/.
 """
 import argparse
@@ -17,8 +17,39 @@ import subprocess
 import sys
 import time
 
-MAC = os.environ.get("MAC", "antoine@192.168.1.7")
 KEY = os.environ.get("MAC_KEY", os.path.expanduser("~/.ssh/id_ed25519_claude"))
+# Le Mac change d'IP (DHCP) et le nom Bonjour (.local) ne se résout pas toujours depuis Windows (multicast) : on essaie d'abord son adresse
+# Tailscale (fixe, marche aussi hors du réseau local), puis la dernière IP vue, puis le nom Bonjour.
+MAC_CANDIDATES = ["100.98.128.21", "192.168.1.127", "macbook-air-de-antoine.local"]
+
+
+def _ssh_to(target, cmd, timeout=60, connect_timeout=None):
+    opts = ["-o", "BatchMode=yes", "-i", KEY] + (["-o", f"ConnectTimeout={connect_timeout}"] if connect_timeout else [])
+    return subprocess.run(["ssh"] + opts + [target, cmd], capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+
+
+def resolve_mac():
+    """(utilisateur@hôte pour SSH, hôte pour le flux d'images). Le flux passe par l'IP du réseau local si le PC l'atteint (le tunnel
+    Tailscale ajoute de la latence) ; sinon par l'adresse qui répond à SSH. `MAC=utilisateur@hôte` force le choix."""
+    import socket
+    forced = os.environ.get("MAC")
+    for target in ([forced] if forced else [f"antoine@{h}" for h in MAC_CANDIDATES]):
+        try:
+            if _ssh_to(target, "true", 15, 4).returncode != 0:
+                continue
+        except subprocess.TimeoutExpired:
+            continue
+        host = target.split("@")[1]
+        lan = _ssh_to(target, "ipconfig getifaddr en0").stdout.strip()
+        try:
+            socket.create_connection((lan, 22), timeout=2).close()
+            return target, lan
+        except OSError:
+            return target, host
+    raise SystemExit(f"Mac injoignable (essayé : {', '.join(MAC_CANDIDATES)}) ; MAC=utilisateur@hôte pour forcer")
+
+
+MAC, DATA_HOST = resolve_mac()
 ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 VENV = "~/aimlabs-remote/venv/bin/python"
 MODEL = "~/aimlabs-remote/repo/algos/yolo11n-seg_256.mlpackage"
@@ -28,13 +59,23 @@ CONFIGS = {
     "view-headless": dict(dir="~/aimlabs-remote/repo", args="--view --view-headless --view-linger 0"),
     "view-gui": dict(dir="~/aimlabs-remote/repo", args="--view --view-linger 0", gui=True),
     "view-gui60": dict(dir="~/aimlabs-remote/repo", args="--view --view-fps 60 --view-linger 0", gui=True),
+    "off-ne": dict(dir="~/aimlabs-remote/repo", args="--units CPU_AND_NE"),
+    "view-gui-ne": dict(dir="~/aimlabs-remote/repo", args="--view --view-linger 0 --units CPU_AND_NE", gui=True),
+    "view-gui20": dict(dir="~/aimlabs-remote/repo", args="--view --view-fps 20 --view-linger 0", gui=True),
+    "view-gui-bg": dict(dir="~/aimlabs-remote/repo", args="--view --view-qos background --view-linger 0", gui=True),
+    "view-gui-def": dict(dir="~/aimlabs-remote/repo", args="--view --view-qos default --view-linger 0", gui=True),
+    "view-gui-init": dict(dir="~/aimlabs-remote/repo", args="--view --view-qos initiated --view-linger 0", gui=True),
     "view-gui15": dict(dir="~/aimlabs-remote/repo", args="--view --view-fps 15 --view-linger 0", gui=True),
     "view-gui-s2": dict(dir="~/aimlabs-remote/repo", args="--view --view-scale 2 --view-linger 0", gui=True),
 }
 
 
 def ssh(cmd, timeout=60):
-    r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-i", KEY, MAC, cmd], capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+    for attempt in range(3):                              # refus / coupure passagers de SSH (code 255) : on réessaie
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-i", KEY, MAC, cmd], capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        if r.returncode != 255:
+            break
+        time.sleep(1.0)
     return r.stdout
 
 
@@ -57,10 +98,12 @@ def children(pid):
 def start_b(cfg, log):
     args = cfg["args"]
     script = f"{cfg['dir']}/remote/poc/sniper_b.py"
-    cmd = (f"cd {cfg['dir']} && exec env AIMLABS_AUTOSTART=1 {VENV} remote/poc/sniper_b.py --connect listen:7777 --model {MODEL} --stats 5 {args} > {log} 2>&1 < /dev/null")
+    cmd = (f"cd {cfg['dir']} && exec env AIMLABS_AUTOSTART=1 {cfg.get('env', '')} {VENV} remote/poc/sniper_b.py --connect listen:7777 --model {MODEL} --stats 5 {args} > {log} 2>&1 < /dev/null")
     ssh("pkill -f '[s]niper_b.py'; sleep 1")
     if cfg.get("gui"):
-        ssh(f"printf '#!/bin/bash\\n{cmd}\\n' > ~/aimlabs-remote/ab.command; chmod +x ~/aimlabs-remote/ab.command; rm -f {log}; open -g -a Terminal ~/aimlabs-remote/ab.command")
+        # session graphique via le « runner » unique de mac_job.sh (pas une fenêtre Terminal par essai)
+        job = f"rm -f {log}; nohup bash -c '{cmd}' > /dev/null 2>&1 < /dev/null &"
+        subprocess.run(["bash", os.path.join(ROOT, "remote", "mac_job.sh"), job], capture_output=True, text=True, timeout=120)
     else:
         ssh(f"rm -f {log}; (nohup bash -c '{cmd}' > /dev/null 2>&1 &)")
     for _ in range(60):
@@ -92,7 +135,7 @@ def run_one(name, cfg, rec, seconds, tag):
     c0 = {p: cpu_seconds(p) for p in [pid] + kids}
     t0 = time.time()
     f = open(replay_log, "w", encoding="utf-8")
-    proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "remote", "poc", "replay_agent.py"), rec, "--connect", MAC.split("@")[1] + ":7777",
+    proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "remote", "poc", "replay_agent.py"), rec, "--connect", DATA_HOST + ":7777",
                              "--seconds", str(seconds)], stdout=f, stderr=subprocess.STDOUT)
     time.sleep(max(seconds - 3.0, 1.0))                    # CPU relevé avant la fin du rejeu : ensuite B quitte (« jeu fermé ») et ses fils aussi
     c1 = {p: cpu_seconds(p) for p in [pid] + kids}

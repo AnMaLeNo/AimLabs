@@ -15,6 +15,10 @@ outils expriment le même besoin, c'est le signe que le jeu (ou le SDK) devrait 
 | `remote/poc/ab_bench.py` (2026-10-24) | **comparer des configurations de B à entrée identique**, entrelacées sur plusieurs tours (le bruit de la machine et la dérive thermique ne favorisent personne), avec le CPU de chaque processus : a chiffré le coût du mode debug et la correction de la conversion d'image | non : outil de mesure |
 | `remote/poc/live_bench.py` (2026-10-24) | **lancer proprement une session de jeu complète** (B, jeu, agent dans le bon ordre + nettoyage) : mes lancements manuels se télescopaient (agent lancé avant le relais, benchmark démarré à vide, processus restants) | oui, probablement : un « mode benchmark distant » du jeu qui attend le relais et sait se relancer |
 | `remote/poc/sniper_view.py` (2026-10-24) | fenêtre debug de B (`sniper_b.py --view`) : voir ce que l'IA reçoit, détecte et décide | non : concerne l'algo du joueur ; mais il révèle ce que le jeu pourrait publier pour le debug (cf. profil `training`) |
+| `remote/mac_job.sh` (2026-10-24) | **exécuter un script dans la VRAIE session graphique du Mac** (fenêtres, capture d'écran, clavier) : depuis SSH on n'y est pas, je ne pouvais donc rien vérifier de visible. Un seul Terminal « runner » (mes premiers essais ouvraient une fenêtre par tâche, qui s'empilaient et ne se fermaient pas) | oui, peut-être : un « mode vérification visuelle » du jeu / SDK qui sait se capturer lui-même |
+| `remote/mac_screenshot.sh` (2026-10-24) | capturer l'écran du Mac et rapatrier le PNG : base de toute itération sur des faits visuels | – |
+| `remote/poc/view_check.py` (2026-10-24) | vérifier la fenêtre debug sur la vraie session : captures à chaque étape, touches simulées (envoyées seulement si la fenêtre est au premier plan), survie de B | non : spécifique à la vue |
+| `remote/poc/pm_check.py` (2026-10-24) | savoir sur QUELS cœurs (E / S) tourne chaque configuration (`powermetrics`, `sudo` sans mot de passe pour cette commande) : a réfuté mon hypothèse « la fenêtre reste sur les cœurs d'efficacité » | – |
 | `remote/poc/recinfo.py` | lire un enregistrement (cadence, taille, trous) | – |
 | `remote/sync_mac.sh` | pousser le code vers le Mac (la copie du Mac avait dérivé : `remote.py` et `agent_a.py` en retard) | un `--sync` du dépôt ou un paquet installable |
 
@@ -28,3 +32,9 @@ outils expriment le même besoin, c'est le signe que le jeu (ou le SDK) devrait 
 * **`_spin` (processus « chauffeur » de `sniper_b.py`) devenait orphelin** quand B était tué (`pkill`) et brûlait un cœur du Mac
   indéfiniment (deux processus, dont un actif depuis plus de 3 h, trouvés sur le Mac). Il s'arrête maintenant avec son parent.
 * **`Image.fromarray(vue RGB renversée)` coûtait 496 µs par image** dans `Detector` (contre 34 µs depuis le BGR d'origine) : 0,97 → 0,58 ms par image sur B.
+* **La fenêtre debug tournait à 14 images/s avec 381 ms de retard, alors que j'annonçais 30** (vu seulement quand j'ai pu capturer l'écran) : la QoS
+  « utility » multiplie par 10 la marge des minuteries, `cv2.waitKey`/`pollKey` bloquent ≈ 15 ms sous Cocoa, et mon protocole demande/accusé s'effondrait
+  dès que les réveils étaient tardifs. Corrigé (latence « tier 0 », attente par `pollKey`, publication à rythme fixe) : 30 images/s mesurées.
+* **Le Mac change d'adresse IP** et son nom `.local` ne se résout pas toujours depuis Windows : refus SSH intermittents. Les outils essaient Tailscale, la dernière IP,
+  puis le nom Bonjour, avec des nouveaux essais sur les erreurs SSH passagères.
+* **`ssh` avale l'entrée standard** : un script passé par un tube à un wrapper qui appelait `ssh` avant de le lire était perdu (tâche vide, sans erreur).

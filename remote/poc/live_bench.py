@@ -40,7 +40,7 @@ def run_live(name, speed, passes, tag):
                              f"--bench-fixed-speed={speed}", f"--bench-passes={passes}", f"--bench-out={out_json}"], stdout=gl, stderr=subprocess.STDOUT)
     time.sleep(12)
     al = open(agent_log, "w", encoding="utf-8", errors="replace")
-    agent = subprocess.Popen([sys.executable, os.path.join(A.ROOT, "remote", "poc", "agent_a.py"), "--connect", A.MAC.split("@")[1] + ":7777", "--transport", "tcp",
+    agent = subprocess.Popen([sys.executable, os.path.join(A.ROOT, "remote", "poc", "agent_a.py"), "--connect", A.DATA_HOST + ":7777", "--transport", "tcp",
                               "--jpeg", "60", "--crop", "384", "--resize", "256"], stdout=al, stderr=subprocess.STDOUT)
     t0 = time.time()
     try:

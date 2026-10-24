@@ -200,6 +200,7 @@ def main(argv=None):
     ap.add_argument("--view-snap-every", type=float, default=0.0)
     ap.add_argument("--view-log", default="", help="CSV de la télémétrie par image (inférence, latence, boîte, décision…)")
     ap.add_argument("--view-linger", type=float, default=5.0, help="secondes pendant lesquelles la fenêtre reste ouverte après l'arrêt de B")
+    ap.add_argument("--view-qos", choices=["background", "utility", "default", "initiated"], default="utility", help="priorité du processus de la fenêtre (macOS : règle aussi la marge des minuteries)")
     a = ap.parse_args(argv)
 
     qos_interactive()
@@ -221,7 +222,7 @@ def main(argv=None):
                     lag_ms=a.lag_ms, return_ms=a.return_ms, bias_ms=a.bias_ms, vmin=a.vmin, horizon=a.horizon, side=side_net,
                     units=a.units, model=os.path.basename(a.model))
         vw = SV.ViewTx(side_net, det.n, det.pshape, meta, fps=a.view_fps, scale=a.view_scale, snap_dir=a.view_snap,
-                       snap_every=a.view_snap_every, headless=a.view_headless, linger=a.view_linger, log=a.view_log)
+                       snap_every=a.view_snap_every, headless=a.view_headless, linger=a.view_linger, log=a.view_log, qos=a.view_qos)
         atexit.register(vw.close)
         print(f"sniper_b : vue debug ouverte (processus {vw.proc.pid}, {a.view_fps:.0f} fps, mémoire partagée {vw.shm.name})", flush=True)
     enabled = os.environ.get("AIMLABS_AUTOSTART") == "1"
