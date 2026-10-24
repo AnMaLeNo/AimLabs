@@ -28,3 +28,6 @@ algos/rust/sniper-rs/target/
 algos/*_u8.onnx
 algos/*_dec.onnx
 algos/*_u8_dec.onnx
+
+# enregistrements de la chaîne distante (agent_a.py --record) : gros, régénérables
+remote/recordings/
