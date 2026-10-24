@@ -54,3 +54,18 @@ outils expriment le même besoin, c'est le signe que le jeu (ou le SDK) devrait 
 * **Wi-Fi du Pi coupé : 5 à 7 ms en moyenne, écart-type ≈ 2,6 ms, 2 à 11 ms** (100 frappes ; une valeur à 72 ms au moment de la coupure). C'est la coexistence Wi-Fi / Bluetooth de la puce CYW43455 qui étale la latence.
 * Trace HCI (`btmon`) : le contrôleur du Pi n'accuse la transmission qu'**23 à 50 ms** après la remise du paquet (par lots de deux), Wi-Fi actif. Écho de LED (ScrollLock) : aller-retour 22,8 ms (σ 13,6 ms), symétrique.
 * Réseau : Mac (Wi-Fi) → Pi (Wi-Fi) 17,7 ms de moyenne, jusqu'à 99,5 ms, 3,3 % de pertes ; PC (Ethernet) → Pi (Wi-Fi) 12 ms de moyenne ; débit TCP PC → Pi 11 Mbit/s sur un lien annoncé à 195.
+
+### Serveur de tir du Pi (2026-10-24) : `remote/pi/` + `remote/poc/pi_fire.py`
+
+| Outil | Pourquoi il existe (le besoin) | Côté jeu ? |
+|---|---|---|
+| `remote/pi/fire_server.py` (+ 30 lignes dans `btkbd.py`) | **API réseau pour tirer par le Pi** : B envoie un ordre UDP signé (HMAC, liste blanche de touches, anti-rejeu) « appuie sur la touche à l'instant T », le Pi l'exécute avec sa propre horloge (SCHED_FIFO, attente active) ; fusion avec le clavier relayé ; keep-alive du lien | oui : la touche de tir configurable du jeu (voir `game/`) |
+| `remote/poc/pi_fire.py` | client côté B : synchronisation d'horloge NTP (RTT minimal + droite de dérive), ordres signés envoyés deux fois, ACK avec le retard réel d'exécution | – |
+| `remote/poc/pi_fire_test.py` | test du chemin complet B → Pi → Bluetooth → Windows avec vérité terrain côté PC | – |
+
+Faits mesurés (Wi-Fi du Pi sur 5 GHz, Pi esclave du lien, mêmes protocoles) :
+* **Inactivité du lien : après ~6 s sans trafic, la première frappe arrive 68 ms plus tard (65 à 72 ms, très stable)** ; après ≤ 2 s elle arrive en ~7 ms. Un rapport HID envoyé toutes les 100 ms (l'état *courant* des touches) supprime l'effet : 5,5 ms en moyenne (σ 2,3 ms) quelle que soit la veille. Aucune modification des réglages d'énergie de Windows n'a été nécessaire.
+* Chemin complet (ordres espacés de 3 s, keep-alive actif) : **40/40 ordres livrés, latence de l'échéance demandée à la touche vue par Windows : 4,8 ms en moyenne, écart-type 2,9 ms, de −0,7 à 11,5 ms ; exécution sur le Pi à +0,007 ms ± 0,005 de l'échéance** (injection 0,04 ms).
+* Le Wi-Fi du Pi perd des paquets par rafales (0 % puis 27 % de pertes sur deux essais de 100 ordres, 60 % de réponses manquantes pendant une synchronisation) : **un câble Ethernet sur le Pi est indispensable** pour un ordre de tir fiable.
+* Piège : `time.monotonic()` n'a que 15,6 ms de résolution sous Windows (Python ≤ 3.12) ; les horloges des outils utilisent `time.perf_counter_ns()`.
+* Piège de mesure : le rapport doit apparier les frappes **par le temps**, pas par l'ordre (une frappe perdue décalait tout et donnait des latences de 7 s), et attendre la fin de la sonde (son fichier est écrit à la fermeture).

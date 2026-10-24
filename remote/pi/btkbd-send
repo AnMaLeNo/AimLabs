@@ -6,6 +6,7 @@
   sudo btkbd-send text "hello"
   sudo btkbd-send key enter
   sudo btkbd-send key r --mods gui
+  sudo btkbd-send fire            # fire server status + Pi-side log of executed shots
 """
 import argparse
 import json
@@ -13,7 +14,7 @@ import socket
 import sys
 
 p = argparse.ArgumentParser()
-p.add_argument("cmd", choices=["status", "pairing", "connect", "disconnect", "text", "key", "raw", "relay"])
+p.add_argument("cmd", choices=["status", "pairing", "connect", "disconnect", "text", "key", "raw", "relay", "fire"])
 p.add_argument("arg", nargs="?")
 p.add_argument("--mods", nargs="*", default=[])
 a = p.parse_args()

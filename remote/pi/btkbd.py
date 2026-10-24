@@ -446,6 +446,8 @@ class Relay:
         self.devs = {}      # path -> name, for status
         self.grabbed = set()
         self.held = []      # [(path, code)] in press order
+        self.inj_keys = []  # HID usages pressed by inject() (fire server), merged with the relayed keyboard
+        self.inj_mod = 0
         self.sent = 0
         self.usage, self.mods = _build_usage_map()
 
@@ -490,11 +492,34 @@ class Relay:
                 mod |= self.mods[code]
             elif len(keys) < 6:
                 keys.append(self.usage[code])
+        mod |= self.inj_mod                      # injected keys (fire_server.py): the report is the union of both sources
+        for u in self.inj_keys:
+            if u not in keys and len(keys) < 6:
+                keys.append(u)
         try:
             hid.send_report(mod, keys)
             self.sent += 1
         except (RuntimeError, OSError):
             pass
+
+    def inject(self, usage, mods, down):
+        """Press / release a key (HID usage) without disturbing what the relayed keyboard is holding."""
+        with self.lock:
+            if down:
+                if usage not in self.inj_keys:
+                    self.inj_keys.append(usage)
+                self.inj_mod |= mods
+            else:
+                if usage in self.inj_keys:
+                    self.inj_keys.remove(usage)
+                self.inj_mod &= ~mods
+            self._flush()
+
+    def keepalive(self):
+        """Re-send the CURRENT report (never an empty one: a held key must stay held). Keeps the Bluetooth link out of its idle state:
+        without traffic the first key after a few seconds of silence reached Windows ~68 ms late (measured: 5.5 ms with a keep-alive)."""
+        with self.lock:
+            self._flush()
 
     def _release_all(self, path=None):
         with self.lock:
@@ -574,6 +599,7 @@ class Relay:
 
 
 relay = Relay()
+fire = None    # FireServer (fire_server.py), started by main() when /etc/btkbd/fire.json exists
 
 
 # ------------------------------------------------------------- command server
@@ -613,6 +639,11 @@ def handle(cmd):
             raise ValueError("unknown key " + name)
         hid.tap(mod, usage)
         return {"sent": name}
+    if c == "inject":  # press / release a HID usage, merged with the relayed keyboard (debugging)
+        relay.inject(int(cmd["usage"]), int(cmd.get("mods", 0)), bool(cmd.get("down", True)))
+        return {}
+    if c == "fire":    # fire server status and the Pi-side log of executed shots (monotonic ns)
+        return {"fire": fire.status() if fire else None, "log": list(fire.log)[-int(cmd.get("n", 20)):] if fire else []}
     if c == "raw":  # [mod, k1..k6] hex, for debugging
         b = bytes.fromhex(cmd["hex"])
         hid.send_report(b[0], list(b[1:]))
@@ -650,6 +681,11 @@ def main():
     threading.Thread(target=command_server, daemon=True).start()
     threading.Thread(target=autoconnect_loop, daemon=True).start()
     relay.start()
+    global fire
+    import fire_server
+    if os.path.exists(fire_server.CONF_PATH):
+        fire = fire_server.FireServer(relay, hid)
+        fire.start()
     GLib.MainLoop().run()
 
 
