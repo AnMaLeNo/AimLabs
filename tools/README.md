@@ -38,3 +38,19 @@ outils expriment le même besoin, c'est le signe que le jeu (ou le SDK) devrait 
 * **Le Mac change d'adresse IP** et son nom `.local` ne se résout pas toujours depuis Windows : refus SSH intermittents. Les outils essaient Tailscale, la dernière IP,
   puis le nom Bonjour, avec des nouveaux essais sur les erreurs SSH passagères.
 * **`ssh` avale l'entrée standard** : un script passé par un tube à un wrapper qui appelait `ssh` avant de le lire était perdu (tâche vide, sans erreur).
+
+## Chaîne de tir par le Raspberry Pi (2026-10-24)
+
+| Outil | Pourquoi il existe (le besoin) | Côté jeu ? |
+|---|---|---|
+| `remote/poc/clocks.py`, `clock_sync.py` | rapprocher les horloges de deux machines (PC / Pi / Mac) par échanges UDP au RTT minimal : `time.time_ns()` de Python ≤ 3.12 sous Windows n'a que ~15 ms de résolution, `clocks.wall_ns()` appelle `GetSystemTimePreciseAsFileTime` | – |
+| `remote/poc/kbd_probe_win.py` | **vérité terrain côté PC** : horodate (QPC) chaque touche reçue par un crochet bas niveau, pour mesurer le chemin « Pi → Bluetooth HID → Windows » | oui, probablement : le jeu pourrait journaliser lui-même l'instant de chaque entrée reçue (mode benchmark) |
+| `remote/pi/bt_probe_send.py` | côté Pi de la mesure : frappes à intervalle connu par le socket local du relais, avec l'instant d'envoi | – |
+| `remote/poc/bt_latency_report.py` | apparier envois et réceptions en recalant les horloges : moyenne, écart-type, percentiles, histogramme | – |
+
+### Faits mesurés sur le chemin Bluetooth (Pi 5 → Intel AX200 du PC)
+
+* Wi-Fi du Pi actif (2,4 GHz, canal 11) : latence **14,1 ms en moyenne, écart-type 10,4 ms, 2 à 80 ms** (300 frappes). Passer le Pi en maître du lien (`hcitool sr … master`) ou interdire le mode sniff ne change presque rien (12,6 ms / 7,9 ms ; 13,2 ms / 9,7 ms).
+* **Wi-Fi du Pi coupé : 5 à 7 ms en moyenne, écart-type ≈ 2,6 ms, 2 à 11 ms** (100 frappes ; une valeur à 72 ms au moment de la coupure). C'est la coexistence Wi-Fi / Bluetooth de la puce CYW43455 qui étale la latence.
+* Trace HCI (`btmon`) : le contrôleur du Pi n'accuse la transmission qu'**23 à 50 ms** après la remise du paquet (par lots de deux), Wi-Fi actif. Écho de LED (ScrollLock) : aller-retour 22,8 ms (σ 13,6 ms), symétrique.
+* Réseau : Mac (Wi-Fi) → Pi (Wi-Fi) 17,7 ms de moyenne, jusqu'à 99,5 ms, 3,3 % de pertes ; PC (Ethernet) → Pi (Wi-Fi) 12 ms de moyenne ; débit TCP PC → Pi 11 Mbit/s sur un lien annoncé à 195.
