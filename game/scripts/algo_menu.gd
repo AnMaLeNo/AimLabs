@@ -14,6 +14,8 @@ var _dir_label: Label
 var _start_btn: Button
 var _stop_btn: Button
 var _mode_btn: OptionButton
+var _fire_key_btn: Button
+var _capturing_fire_key := false
 var _agent_btn: OptionButton
 var _weapon_btn: OptionButton
 var _map_btn: OptionButton
@@ -168,6 +170,17 @@ func _build() -> void:
 		_mode_btn.add_item(m)
 	_mode_btn.item_selected.connect(func(i: int) -> void: game.set_mode(_mode_btn.get_item_text(i)))
 	bottom.add_child(_mode_btn)
+	var fire_label := Label.new()
+	fire_label.text = "Touche de tir :"
+	bottom.add_child(fire_label)
+	_fire_key_btn = Button.new()
+	_fire_key_btn.tooltip_text = "Touche du clavier qui tire (avec le clic gauche). Cliquer, puis appuyer sur la touche ; Échap annule."
+	_fire_key_btn.pressed.connect(func() -> void:
+		_capturing_fire_key = true
+		_fire_key_btn.text = "appuyez sur une touche…")
+	bottom.add_child(_fire_key_btn)
+	game.fire_key_changed.connect(_refresh_fire_key)
+	_refresh_fire_key()
 	var spacer := Control.new()
 	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	bottom.add_child(spacer)
@@ -180,6 +193,22 @@ func _build() -> void:
 	resume.text = "Reprendre"
 	resume.pressed.connect(func() -> void: game.player.set_mouse_captured(true))
 	bottom.add_child(resume)
+
+
+func _refresh_fire_key() -> void:
+	_capturing_fire_key = false
+	_fire_key_btn.text = game.fire_key_name()
+
+
+## While the fire-key button waits, the next key press becomes the fire key (Esc cancels).
+func _input(event: InputEvent) -> void:
+	if not _capturing_fire_key or not (event is InputEventKey) or not event.pressed or event.echo:
+		return
+	get_viewport().set_input_as_handled()
+	if event.physical_keycode == KEY_ESCAPE:
+		_refresh_fire_key()
+	else:
+		game.set_fire_key(event.physical_keycode)
 
 
 ## Information profile: "real" = the game gives out nothing but the keys; "training" = everything, each source switchable.

@@ -5,10 +5,13 @@ extends Node
 ##   --smoke-test          aim at a target through the "assist" input path, shoot,
 ##                         verify the hit is registered, quit with exit code 0/1
 ##   --bridge=off          do not start the AimBridge (default: on)
-##   --mode=<name>         game mode, see MODES (default: full)
+##   --mode=<name>         game mode, see MODES (default: full). silent = no bridge, nothing at all is published: the game
+##                         only reacts to real input events (the fire key below, the mouse)
+##   --fire-key=<name>     keyboard fire key besides the left mouse button (e.g. G, F5, KP_0; default G; also settable in the
+##                         Esc menu, saved in user://settings.cfg)
 ##   --info=<profile>      information profile: real (the game gives out nothing but the keys) | training[,-key,+key,-all]
 ##                         (everything, each source switchable: state, meta, hud, timecode, truth); default real for
-##                         --mode=remote, training otherwise
+##                         --mode=remote and --mode=silent, training otherwise
 ##   --info-port=<n> --info-hz=<n>   ground-truth UDP stream (information option "truth"), default 7790 / 240
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
@@ -46,7 +49,17 @@ const MODES := {
 	# Two-machine mode: the game publishes no image at all and only accepts commands; the player
 	# gets the pixels by his own means (screen capture…) and runs the algo elsewhere (see remote/).
 	"remote": { "vision": false, "move": true, "fire": true, "size": Vector2i(0, 0) },
+	# Nothing at all: no bridge, no image, no state, no command. The game only reacts to REAL input events (the configurable fire
+	# key, the mouse), so everything else — grabbing the picture, deciding, sending the key press — is the player's problem.
+	"silent": { "vision": false, "move": false, "fire": false, "size": Vector2i(0, 0) },
 }
+
+## Fire key (besides the left mouse button): a physical keycode, configurable from the Esc menu or with --fire-key=<name>.
+## Saved in user://settings.cfg. Physical = position on the keyboard, whatever the layout.
+const SETTINGS_PATH := "user://settings.cfg"
+const DEFAULT_FIRE_KEY := KEY_G
+var fire_key: int = DEFAULT_FIRE_KEY
+signal fire_key_changed
 
 @onready var world: World = $World
 @onready var player: Player = $Player
@@ -96,6 +109,10 @@ func _ready() -> void:
 	player.mouse_capture_changed.connect(hud.set_mouse_captured)
 	if (_args.has("--screenshot") or _args.has("--smoke-test")) and not _args.has("--menu"):
 		player.set_mouse_captured(true)
+	_load_fire_key()
+	if String(_args.get("--mode", "")) == "silent":
+		_args["--bridge"] = "off"   # silent: the game gives out nothing at all, so there is nothing to bridge
+		set_mode("silent")          # no bridge to configure: the mode is just a name (information profile "real")
 	if String(_args.get("--bridge", "on")) != "off":
 		_start_bridge()
 	runner = AlgoRunner.new()
@@ -186,6 +203,48 @@ func _start_bridge() -> void:
 		push_error("AimBridge failed to start")
 
 
+## Fire key: --fire-key=<name> (e.g. G, F5, KP_0) wins over the saved setting, which wins over the default.
+func _load_fire_key() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_PATH) == OK:
+		fire_key = int(cfg.get_value("input", "fire_key", DEFAULT_FIRE_KEY))
+	if _args.has("--fire-key"):
+		var k := OS.find_keycode_from_string(String(_args["--fire-key"]))
+		if k == KEY_NONE:
+			push_warning("--fire-key: unknown key '%s', keeping %s" % [_args["--fire-key"], fire_key_name()])
+		else:
+			fire_key = k
+	_apply_fire_key()
+
+
+## Make [param physical_keycode] the keyboard fire key (the left mouse button keeps firing). Saved for the next run.
+func set_fire_key(physical_keycode: int, save := true) -> void:
+	fire_key = physical_keycode
+	_apply_fire_key()
+	if save:
+		var cfg := ConfigFile.new()
+		cfg.load(SETTINGS_PATH)
+		cfg.set_value("input", "fire_key", fire_key)
+		cfg.save(SETTINGS_PATH)
+	fire_key_changed.emit()
+
+
+func fire_key_name() -> String:
+	if DisplayServer.get_name() == "headless":   # that server cannot translate a physical key (nothing to display anyway)
+		return OS.get_keycode_string(fire_key as Key)
+	return OS.get_keycode_string(DisplayServer.keyboard_get_keycode_from_physical(fire_key as Key))
+
+
+## The "fire" action = left mouse button + the fire key (the player fires only while the mouse is captured, i.e. while playing).
+func _apply_fire_key() -> void:
+	for ev in InputMap.action_get_events("fire"):
+		if ev is InputEventKey:
+			InputMap.action_erase_event("fire", ev)
+	var e := InputEventKey.new()
+	e.physical_keycode = fire_key as Key
+	InputMap.action_add_event("fire", e)
+
+
 ## Switch what the external program may see / do (see MODES); works while playing.
 ## Choose the played character (first-person arms). Returns false if the model is missing.
 func set_agent(slug: String) -> bool:
@@ -222,7 +281,7 @@ func _setup_info() -> void:
 	truth.name = "TruthStream"
 	add_child(truth)
 	truth.setup(self, int(_args.get("--info-port", 7790)), float(_args.get("--info-hz", 240.0)))
-	var spec := String(_args.get("--info", "real" if mode_name == "remote" else "training"))
+	var spec := String(_args.get("--info", "real" if mode_name in ["remote", "silent"] else "training"))
 	var parts := spec.split(",", false)
 	var profile := String(parts[0]) if parts.size() > 0 else "training"
 	for p in parts.slice(1):

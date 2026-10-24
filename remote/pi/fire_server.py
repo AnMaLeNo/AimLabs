@@ -124,7 +124,9 @@ class FireServer:
                     self._on_fire(seq, P_FIRE.unpack(p), addr, t2)
                 elif typ == T_CANCEL:
                     with self.cv:
-                        if self.pending is not None:
+                        # n'annule que les ordres PLUS ANCIENS que l'annulation (numéro de séquence) : un tir envoyé juste après elle, ou
+                        # qui la doublerait sur le réseau, n'est jamais perdu
+                        if self.pending is not None and self.pending[4] < seq:
                             self.pending = None
                             self.stats["cancelled"] += 1
                             self.cv.notify_all()

@@ -45,7 +45,10 @@ def state_json(aim: AimClient, game_alive: bool, fps: float) -> bytes:
     """L'état que B reçoit : les TOUCHES du jeu (seule information que le profil « réel » laisse sortir) et les
     mesures de l'agent lui-même. `time_usec` et `fps` sont à l'horloge / au rythme de CET agent (le jeu n'en donne
     aucun) : `time_usec − capture_usec` d'une image reste donc la latence depuis sa capture."""
-    s = aim.state()
+    if aim is None:   # --no-bridge (jeu en mode silent) : le jeu ne donne même pas les touches
+        s = {"keys_down": [], "physical_keys_down": [], "mouse_down": []}
+    else:
+        s = aim.state()
     for k in ("keys_down", "physical_keys_down", "mouse_down"):
         s[k] = sorted(s[k])
     s["game_alive"] = game_alive
@@ -69,6 +72,7 @@ def main() -> int:
     ap.add_argument("--apply-lead-ms", type=float, default=1.0, help="tirs programmés : avance de l'envoi dans le jeu (le jeu applique les commandes au début de sa frame suivante)")
     ap.add_argument("--state-hz", type=float, default=60.0)
     ap.add_argument("--stats", type=float, default=2.0)
+    ap.add_argument("--no-bridge", action="store_true", help="n'attache aucun pont au jeu (jeu en mode silent) : capture d'écran et envoi des images seulement")
     ap.add_argument("--record", default="", help="enregistre les images envoyées (HELLO + FRAME) dans ce fichier : à rejouer avec replay_agent.py")
     args = ap.parse_args()
     if hasattr(sys.stdout, "reconfigure"):   # sortie redirigée sous Windows = cp1252 : « → » y plante le print des stats
@@ -80,8 +84,12 @@ def main() -> int:
         import ctypes
         ctypes.windll.winmm.timeBeginPeriod(1)                                  # résolution des attentes : 1 ms
         ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x80)  # HIGH_PRIORITY_CLASS
-    aim = AimClient(args.shm, timeout=30)
-    print(f"agent A : pont attaché, mode {aim.mode}", flush=True)
+    if args.no_bridge:
+        aim = None       # jeu en mode silent : aucun pont, l'agent ne fait que capturer l'écran et envoyer les images
+        print("agent A : sans pont (mode silent) : capture d'écran seulement", flush=True)
+    else:
+        aim = AimClient(args.shm, timeout=30)
+        print(f"agent A : pont attaché, mode {aim.mode}", flush=True)
     cap = ScreenCapture(title=args.window, crop=args.crop or None, backend=args.backend, color="BGR").start()
     W, H = cap._win
     print(f"agent A : capture {cap.backend_name}, fenêtre {W}x{H}, région {cap._region}", flush=True)
@@ -173,6 +181,9 @@ def main() -> int:
             sched_n["fired"] += 1
 
     def handle_cmd(kind: int, fid: int, dx: float, dy: float) -> None:
+        if aim is None:        # sans pont (mode silent) il n'y a personne à qui transmettre : les ordres de tir passent par le Pi
+            cmds["n"] += 1
+            return
         t = now_us()
         if kind == R.CMD_FIRE_AT:
             if fid in cap_times:
@@ -202,7 +213,7 @@ def main() -> int:
         elif kind == R.CMD_MARK:
             aim.mark(frame_id=0, x=dx, y=dy)
 
-    hello = json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode, "udp": use_udp}).encode()
+    hello = json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode if aim else {"vision": False, "move": False, "fire": False}, "udp": use_udp}).encode()
     send(R.T_HELLO, hello)
     rec = None
     if args.record:
@@ -239,7 +250,7 @@ def main() -> int:
             stop.set()
 
     def game_hb() -> int:
-        return aim._u64.unpack_from(aim._buf, P.OFF_GAME_HEARTBEAT)[0]
+        return aim._u64.unpack_from(aim._buf, P.OFF_GAME_HEARTBEAT)[0] if aim else 0
 
     def state_loop() -> None:
         last_hb, last_change = game_hb(), time.monotonic()
@@ -249,8 +260,9 @@ def main() -> int:
                 hb = game_hb()
                 if hb != last_hb:
                     last_hb, last_change = hb, time.monotonic()
-                alive = time.monotonic() - last_change < 1.0
-                aim.beat()
+                alive = True if aim is None else time.monotonic() - last_change < 1.0   # sans pont, on ne sait rien du jeu : B ne s'arrête jamais de lui-même
+                if aim is not None:
+                    aim.beat()
                 try:
                     send(R.T_STATE, state_json(aim, alive, rate["fps"]))
                 except RuntimeError:

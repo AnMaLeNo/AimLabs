@@ -56,6 +56,7 @@ class PiFire:
         self.samples = collections.deque(maxlen=int(sync_hz * window_s) + 8)   # (t4_ns, rtt_ns, theta_ns)
         self.fit = None                                                       # (t_ref_ns, theta_ref_ns, drift ns/ns, rtt_best_ns, n)
         self.acks = collections.deque(maxlen=256)                              # (seq, status, due_pi, t_pre, t_post, t_rx_b)
+        self.acks_new = collections.deque(maxlen=256)                          # idem, vidé par drain_acks()
         self.sent = {}                                                         # seq -> (due_pi_ns, due_b_ns) des ordres récents
         self.counters = {"pings": 0, "pongs": 0, "fires": 0, "acks": 0, "bad_mac": 0}
         self.stop = threading.Event()
@@ -126,6 +127,7 @@ class PiFire:
                 st, due, t_pre, t_post = P_ACK.unpack(p)
                 self.counters["acks"] += 1
                 self.acks.append((seq, st, due, t_pre, t_post, t4))
+                self.acks_new.append((seq, st, due, t_pre, t_post, t4))
 
     def _refit(self):
         """Droite θ(t) sur les échanges au plus petit RTT de la fenêtre (le meilleur RTT borne l'erreur d'asymétrie à RTT/2)."""
@@ -190,6 +192,17 @@ class PiFire:
             return True
         except OSError:
             return False
+
+    def drain_acks(self):
+        """ACK reçus depuis le dernier appel : (nombre, statuts, retard moyen et maximal d'exécution sur le Pi en ms pour les tirs exécutés)."""
+        items = []
+        while self.acks_new:
+            items.append(self.acks_new.popleft())
+        late = [(t_pre - due) / 1e6 for _, st, due, t_pre, _, _ in items if st == 0 and due]
+        by = {}
+        for _, st, *_ in items:
+            by[STATUS.get(st, st)] = by.get(STATUS.get(st, st), 0) + 1
+        return len(items), by, (sum(late) / len(late) if late else None), (max(late) if late else None)
 
     def stats(self):
         f = self.fit
