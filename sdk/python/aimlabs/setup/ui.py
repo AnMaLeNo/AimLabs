@@ -551,9 +551,16 @@ class SetupWindow:
         self._start()
         cv2.namedWindow(self.name, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(self.name, self.mouse)
+        pos = os.environ.get("AIMLABS_SETUP_POS")        # « x,y » : place la fenêtre à un endroit connu (tests automatisés de la souris, voir remote/mac_input.py)
         try:
             while self.result is None:
                 cv2.imshow(self.name, self.render())
+                if pos:
+                    try:
+                        cv2.moveWindow(self.name, *[int(v) for v in pos.split(",")])
+                    except (ValueError, cv2.error):
+                        pass
+                    pos = None
                 self.key(cv2.waitKeyEx(30))
         finally:
             self._stop()
