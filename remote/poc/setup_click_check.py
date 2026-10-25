@@ -70,7 +70,8 @@ sleep 2
     cap = vals["capture"]
     ok1 = (cap["dx"], cap["dy"]) != (0, 0)
     ok2 = vals["auto_toggle"]["key"] == "PAUSE"
-    print(f"glisser dans l'aperçu : décalage ({cap['dx']}, {cap['dy']}) -> {'ok' if ok1 else "FAUX (rien n'a bougé)"}")
+    verdict1 = "ok" if ok1 else "FAUX : rien n'a bougé"
+    print(f"glisser dans l'aperçu : décalage ({cap['dx']}, {cap['dy']}) -> {verdict1}")
     print(f"clic sur la case + touche Pause du Pi : {vals['auto_toggle']} -> {'ok' if ok2 else 'FAUX'}")
     print("RÉSULTAT :", "TOUT EST BON" if ok1 and ok2 else "ÉCHEC")
     sys.exit(0 if ok1 and ok2 else 1)
