@@ -171,34 +171,6 @@ class Track:
         return vx, vy, max(rx, ry)
 
 
-def setup_capture(c, a, side_net):
-    """Cadrage de la capture du PC A (agents qui proposent le canal de réglage ; les autres, comme replay_agent.py, sont laissés tels quels).
-    Priorité : drapeaux > --capture-config (ou fichier enregistré si --setup) > état de l'agent. Le côté de l'image envoyée est toujours celui du réseau de B."""
-    if not c.has_ctrl:
-        if a.setup or a.capture_config or a.capture_window or a.capture_mode:
-            print("sniper_b : cet agent n'a pas de canal de réglage de la capture : cadrage ignoré", flush=True)
-        return
-    import sniper_setup as SS
-    flags = {"mode": a.capture_mode, "title": a.capture_window, "process": a.capture_process, "monitor": a.capture_monitor, "crop": a.capture_crop}
-    if a.capture_window and not a.capture_mode:
-        flags["mode"] = "window"
-    if a.capture_offset:
-        flags["dx"], flags["dy"] = (int(v) for v in a.capture_offset.split(","))
-    saved = SS.load_cfg(a.capture_config) if a.capture_config else (SS.load_cfg() if a.setup else None)
-    if a.capture_config and saved is None:
-        print(f"sniper_b : ATTENTION, {a.capture_config} illisible : cadrage de l'agent conservé", flush=True)
-    cfg = SS.initial_config(c, saved, flags)
-    cfg["resize"] = side_net
-    if a.setup:
-        cfg = SS.run_setup(c, cfg, side_net) or SS.initial_config(c)
-    elif not (saved or any(v is not None for v in flags.values())) and (c.hello.get("capture") or {}).get("config", {}).get("resize") == side_net:
-        return                                              # rien à changer
-    r = c.ctrl("set", config=cfg)
-    info = r[0] if r else {}
-    print(f"sniper_b : capture {cfg['mode']}" + (f" « {cfg['title']} »" if cfg["mode"] == "window" else "") + f", carré {cfg['crop']} px → {side_net}, "
-          f"décalage {cfg['dx']:+d},{cfg['dy']:+d}" + ("" if info.get("found", True) else f" — ATTENTION : {info.get('error')}"), flush=True)
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--connect", default=os.environ.get("AIMLABS_REMOTE", "listen:7777"))
@@ -212,7 +184,7 @@ def main(argv=None):
     ap.add_argument("--cooldown", type=float, default=1.0)
     ap.add_argument("--extra-ms", type=float, default=None, help="tir immédiat de repli : latence non mesurée par B (retour B→A + application dans le jeu) ajoutée au temps écoulé (défaut 6,5 ; par le Pi : --pi-return-ms + --pi-lead-ms)")
     ap.add_argument("--fire-via", default="remote", help="remote : ordres renvoyés à l'agent du PC A (SDK) ; pi:HOTE[:PORT] : ordres envoyés au Raspberry Pi, qui appuie sur la touche de tir du jeu par Bluetooth (jeu en mode silent)")
-    ap.add_argument("--pi-usage", type=int, default=10, help="touche HID de tir (10 = G) : doit être la touche de tir du jeu ET figurer dans la liste blanche du Pi")
+    ap.add_argument("--pi-usage", type=int, default=None, help="touche HID de tir (défaut : celle des réglages, sinon 10 = G) : doit être la touche de tir du jeu ET figurer dans la liste blanche du Pi")
     ap.add_argument("--pi-hold-ms", type=float, default=25.0, help="durée d'appui de la touche")
     ap.add_argument("--pi-lead-ms", type=float, default=4.8, help="latence moyenne Pi -> Bluetooth -> jeu (mesurée : 4,8 ms) : on appuie ce temps plus tôt")
     ap.add_argument("--pi-return-ms", type=float, default=4.0, help="temps réservé au trajet B -> Pi (réseau) avant l'échéance")
@@ -224,8 +196,10 @@ def main(argv=None):
     ap.add_argument("--bias-ms", type=float, default=None, help="tir programmé : décalage ajouté à l'instant visé (calibration ; défaut −1 par l'agent A, 0 par le Pi)")
     ap.add_argument("--vmin", type=float, default=60.0, help="vitesse (px réseau/s) en dessous de laquelle on tire immédiatement")
     ap.add_argument("--horizon", type=float, default=0.4, help="on ne programme pas un tir plus lointain (s)")
-    ap.add_argument("--setup", action="store_true", help="avant de démarrer : fenêtre de réglage du cadrage de la capture du PC A (image envoyée, fenêtre ou écran, recadrage à la main) ; Entrée valide, l'algo tourne ensuite normalement")
-    ap.add_argument("--capture-config", default="", help="fichier JSON de cadrage à appliquer à l'agent sans fenêtre (celui qu'écrit --setup : ~/.aimlabs/capture.json)")
+    ap.add_argument("--setup", action="store_true", help="avant de démarrer : fenêtre de RÉGLAGES (cadrage de la capture du PC A, touches d'entrée et de sortie) ; Entrée valide et enregistre dans ~/.aimlabs/sniper_b.json, l'algo tourne ensuite normalement")
+    ap.add_argument("--settings", nargs="?", const="", default=None, metavar="FICHIER", help="applique les réglages enregistrés (défaut : ~/.aimlabs/sniper_b.json) sans ouvrir la fenêtre")
+    ap.add_argument("--keys", choices=["auto", "pi", "game"], default="auto", help="d'où viennent les touches de commande : le clavier vu par le Pi (auto avec --fire-via pi:…) ou les touches que le jeu publie en mode remote")
+    ap.add_argument("--capture-config", default="", help="fichier JSON de cadrage à appliquer à l'agent (écrit par sniper_setup.py ou par --setup : entrée « capture »)")
     ap.add_argument("--capture-mode", choices=["screen", "window"], default=None, help="cadrage imposé à l'agent : centre de l'ÉCRAN ou d'une FENÊTRE")
     ap.add_argument("--capture-window", default=None, help="motif du titre de la fenêtre (« AimLabs ») ; implique --capture-mode window")
     ap.add_argument("--capture-process", default=None, help="processus de la fenêtre (« godot »)")
@@ -276,12 +250,11 @@ def main(argv=None):
     if via_pi:                                              # tir par le Raspberry Pi : ordre UDP signé -> Bluetooth HID -> touche de tir du jeu
         from pi_fire import PiFire
         host, _, port = a.fire_via[3:].partition(":")
-        fx = PiFire(host, int(port or 7780), usage=a.pi_usage, hold_ms=a.pi_hold_ms, late_ms=a.pi_late_ms)
+        fx = PiFire(host, int(port or 7780), usage=a.pi_usage or 10, hold_ms=a.pi_hold_ms, late_ms=a.pi_late_ms)
         if fx.start(wait_sync=15.0):
-            print(f"sniper_b : tir par le Pi {host} (RTT {fx.rtt_best_ms():.2f} ms, touche HID {a.pi_usage}, avance {a.pi_lead_ms} ms)", flush=True)
+            print(f"sniper_b : tir par le Pi {host} (RTT {fx.rtt_best_ms():.2f} ms, avance {a.pi_lead_ms} ms)", flush=True)
         else:
             print(f"sniper_b : ATTENTION, pas de synchronisation avec le Pi {host} (secret, pare-feu, adresse ?) : les tirs programmés seront refusés", flush=True)
-    enabled = os.environ.get("AIMLABS_AUTOSTART") == "1"
     print(f"sniper_b : Core ML {a.units}, réseau {side_net}px, en attente de l'agent du PC A ({a.connect})…", flush=True)
     track, locked, last_fire = None, False, -1e9
     n = n_fire = n_sched = 0
@@ -313,7 +286,15 @@ def main(argv=None):
                 return True                                 # le jeu ne reçoit aucune marque : critère « hit »
             ret_s = (a.pi_return_ms + a.pi_lead_ms) / 1e3  # l'ordre doit arriver avant (échéance − avance Bluetooth)
         print("sniper_b : connecté, mode", c.mode, flush=True)
-        setup_capture(c, a, side_net)
+        import sniper_settings as SSET
+        pi_host, _, pi_port = (a.fire_via[3:] if via_pi else "").partition(":")
+        ctl = SSET.phase(c, a, side_net, pi_host or None, int(pi_port or 7780))
+        if fx is not None and a.pi_usage is None and ctl.fire_usage:
+            fx.usage = ctl.fire_usage                       # touche de tir choisie dans les réglages
+        import atexit
+        atexit.register(ctl.close)                          # rend aussitôt au PC les touches que B bloquait
+        bget_auto, bget_hold, msrc = (lambda: ctl.bind.get("auto")), (lambda: ctl.bind.get("hold")), ctl.msrc
+        was_auto = bget_auto()
         while True:
             fr = c.crop(timeout=2.0)
             if fr is None:
@@ -324,11 +305,15 @@ def main(argv=None):
             prev_rx = rx_last
             fid, cap_us, rx, crop, (x0, y0), (W, H) = fr
             rx_last = rx
-            k = c.keys()
-            if "CAPSLOCK" in k.just_pressed:
-                enabled = not enabled
+            if msrc is not None:                            # touches publiées par le jeu : on n'alimente les liaisons qu'aux changements
+                k = c.keys()
+                if k.just_pressed or k.just_released:
+                    msrc.feed_down(k.down)
+            enabled = bget_auto()
+            if enabled != was_auto:
+                was_auto = enabled
                 print("sniper", "ON" if enabled else "OFF", flush=True)
-            active = enabled or "ALT" in k
+            active = enabled or bget_hold()
             now = time.monotonic()
             if now - t_stats > a.stats:
                 if active and n:

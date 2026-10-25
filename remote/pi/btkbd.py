@@ -461,6 +461,9 @@ class Relay:
         self.inj_keys = []  # HID usages pressed by inject() (fire server), merged with the relayed keyboard
         self.inj_mod = 0
         self.sent = 0
+        self.on_key = None          # callback(usage, down) du serveur de tir : flux des touches vers B (appelé après l'envoi du rapport au PC)
+        self.swallow_all = False    # B assigne une touche : rien n'est relayé au PC (tant que B est abonné)
+        self.swallow = frozenset()  # usages à NE PAS relayer au PC (demandé par B tant qu'il est abonné, voir fire_server.py)
         self.usage, self.mods = _build_usage_map()
 
     def start(self):
@@ -589,15 +592,22 @@ class Relay:
                     code = ev.code
                     if code not in self.mods and code not in self.usage:
                         continue
+                    kusage = (0xE0 + self.mods[code].bit_length() - 1) if code in self.mods else self.usage[code]
                     with self.lock:
                         item = (path, code)
-                        if ev.value == 1 and item not in self.held:
-                            self.held.append(item)
-                        elif ev.value == 0 and item in self.held:
+                        changed = False
+                        if ev.value == 1:
+                            if item not in self.held and kusage not in self.swallow and not self.swallow_all:
+                                self.held.append(item)
+                                changed = True
+                        elif item in self.held:
                             self.held.remove(item)
-                        else:
-                            continue
-                        self._flush()
+                            changed = True
+                        if changed:
+                            self._flush()
+                    cb = self.on_key
+                    if cb is not None:
+                        cb(kusage, ev.value == 1)
         except OSError as e:
             log("relay: device gone:", dev.name, e)
         finally:
