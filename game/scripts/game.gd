@@ -47,7 +47,7 @@ const MODES := {
 	"fire_only": { "vision": true, "move": false, "fire": true, "size": Vector2i(0, 0) },
 	"blind": { "vision": false, "move": true, "fire": true, "size": Vector2i(0, 0) },
 	# Two-machine mode: the game publishes no image at all and only accepts commands; the player
-	# gets the pixels by his own means (screen capture…) and runs the algo elsewhere (see remote/).
+	# gets the pixels by his own means (screen capture…) and runs the algo elsewhere (see https://github.com/AnMaLeNo/aimlabs-pipeline).
 	"remote": { "vision": false, "move": true, "fire": true, "size": Vector2i(0, 0) },
 	# Nothing at all: no bridge, no image, no state, no command. The game only reacts to REAL input events (the configurable fire
 	# key, the mouse), so everything else — grabbing the picture, deciding, sending the key press — is the player's problem.
