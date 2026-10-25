@@ -99,7 +99,7 @@ def run(speed, passes, pi, lead_ms, bias_ms, settle, tag, extra_b=""):
     else:
         al = open(agent_log, "w", encoding="utf-8", errors="replace")
         agent = subprocess.Popen([sys.executable, os.path.join(A.ROOT, "remote", "poc", "agent_a.py"), "--no-bridge", "--connect", A.DATA_HOST + ":7777", "--transport", "tcp",
-                                  "--jpeg", "60", "--crop", "384", "--resize", "256"], stdout=al, stderr=subprocess.STDOUT)
+                                  "--jpeg", "60", "--crop", "384", "--resize", "256", "--window", "AimLabs (DEBUG)"], stdout=al, stderr=subprocess.STDOUT)
         try:
             game.wait(timeout=settle + 60 + passes * 6)
         except subprocess.TimeoutExpired:

@@ -34,7 +34,7 @@ sys.path.insert(0, os.path.join(ROOT, "remote", "level1"))
 from aimlabs import AimClient  # noqa: E402
 from aimlabs import protocol as P  # noqa: E402
 from aimlabs import remote as R  # noqa: E402
-from screencap import ScreenCapture  # noqa: E402
+from capture_ctl import DEFAULT_CFG, CaptureController  # noqa: E402
 
 
 def now_us() -> int:
@@ -62,11 +62,15 @@ def main() -> int:
     ap.add_argument("--connect", default="", help="hote:port de B (B lance « listen:port ») ; défaut : l'agent écoute")
     ap.add_argument("--listen", default="0.0.0.0:7777")
     ap.add_argument("--transport", choices=["tcp", "udp"], default="tcp", help="udp : images/état/commandes en datagrammes (nécessite --connect)")
-    ap.add_argument("--crop", type=int, default=240, help="côté du carré central envoyé (0 = fenêtre entière)")
-    ap.add_argument("--resize", type=int, default=0, help="réduit le carré capturé à ce côté (INTER_AREA) avant l'envoi : champ plus large, même débit et même inférence")
+    ap.add_argument("--crop", type=int, default=DEFAULT_CFG["crop"], help="côté du carré envoyé, centré sur l'écran ou la fenêtre (0 = tout) ; B peut le régler ensuite (sniper_b.py --setup)")
+    ap.add_argument("--resize", type=int, default=DEFAULT_CFG["resize"], help="réduit le carré capturé à ce côté avant l'envoi (0 = pas de réduction) : champ plus large, même débit et même inférence")
+    ap.add_argument("--capture-mode", choices=["screen", "window"], default="", help="cadrage : centre de l'ÉCRAN (défaut) ou d'une FENÊTRE (--window) ; B peut le changer à chaud")
+    ap.add_argument("--monitor", type=int, default=0, help="écran de référence du mode « screen » (0 = principal)")
+    ap.add_argument("--offset", default="0,0", help="décalage du carré par rapport au centre, « dx,dy » en pixels")
     ap.add_argument("--interp", choices=["linear", "area", "nearest"], default="linear", help="interpolation de --resize (area : 0,44 ms, linear : 0,10 ms)")
     ap.add_argument("--jpeg", type=int, default=0, help="qualité JPEG 1-100 (0 = pixels bruts)")
-    ap.add_argument("--window", default="AimLabs (DEBUG)")
+    ap.add_argument("--window", default="", help="motif du titre de la fenêtre du jeu (« AimLabs », « AimLabs (DEBUG) »… : identique > commence par > contient) ; donner un titre implique --capture-mode window")
+    ap.add_argument("--window-process", default="", help="nom du processus de la fenêtre (« godot ») : départage deux fenêtres de même titre")
     ap.add_argument("--backend", choices=["auto", "dxcam", "mss"], default="auto")
     ap.add_argument("--shm", default=os.environ.get("AIMLABS_SHM", "aimlabs"))
     ap.add_argument("--apply-lead-ms", type=float, default=1.0, help="tirs programmés : avance de l'envoi dans le jeu (le jeu applique les commandes au début de sa frame suivante)")
@@ -90,9 +94,17 @@ def main() -> int:
     else:
         aim = AimClient(args.shm, timeout=30)
         print(f"agent A : pont attaché, mode {aim.mode}", flush=True)
-    cap = ScreenCapture(title=args.window, crop=args.crop or None, backend=args.backend, color="BGR").start()
-    W, H = cap._win
-    print(f"agent A : capture {cap.backend_name}, fenêtre {W}x{H}, région {cap._region}", flush=True)
+    try:
+        odx, ody = (int(v) for v in args.offset.split(","))
+    except ValueError:
+        ap.error("--offset attend « dx,dy »")
+    mode = args.capture_mode or ("window" if args.window else "screen")
+    ctl = CaptureController({"mode": mode, "title": args.window, "process": args.window_process, "monitor": args.monitor, "dx": odx, "dy": ody,
+                             "crop": args.crop or 2048, "resize": args.resize}, backend=args.backend).start()
+    W, H = ctl.res["ref"][2:]
+    inf = ctl.info()
+    print(f"agent A : capture {ctl.cap.backend_name}, mode {ctl.cfg['mode']}, référence {W}x{H}, région {inf['region']}"
+          + ("" if ctl.found else f" — {inf['error']} : centre de l'écran en attendant"), flush=True)
 
     if args.connect:
         host, port = args.connect.rsplit(":", 1)
@@ -213,7 +225,8 @@ def main() -> int:
         elif kind == R.CMD_MARK:
             aim.mark(frame_id=0, x=dx, y=dy)
 
-    hello = json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode if aim else {"vision": False, "move": False, "fire": False}, "udp": use_udp}).encode()
+    hello = json.dumps({"version": R.VERSION, "width": W, "height": H, "mode": aim.mode if aim else {"vision": False, "move": False, "fire": False}, "udp": use_udp,
+                        "ctrl": True, "capture": ctl.info()}).encode()
     send(R.T_HELLO, hello)
     rec = None
     if args.record:
@@ -271,12 +284,42 @@ def main() -> int:
         except OSError:
             stop.set()
 
+    def handle_ctrl(p) -> None:
+        """Réglage de la capture demandé par B (voir sniper_setup.py) : get_info, get_preview {target}, set {config}. Toute erreur est renvoyée à B, jamais fatale."""
+        rid = None
+        try:
+            req = json.loads(bytes(p))
+            rid, op = req.get("id"), req.get("op")
+            if op == "set":
+                ctl.set_config(req.get("config") or {})
+                deadline = time.monotonic() + 1.0
+                seq0 = ctl.seq
+                while ctl.seq == seq0 and time.monotonic() < deadline:     # appliqué par la boucle de capture : on rend l'état résultant
+                    time.sleep(0.01)
+                send(R.T_INFO, json.dumps({"id": rid, **ctl.info()}).encode())
+            elif op == "get_info":
+                send(R.T_INFO, json.dumps({"id": rid, **ctl.info(full=True)}).encode())
+            elif op == "get_preview":
+                meta, jpeg = ctl.preview(req.get("target"), max_w=int(req.get("max_w", 960)))
+                head = json.dumps({"id": rid, **meta}).encode()
+                send(R.T_PREVIEW, struct.pack("<I", len(head)) + head + (jpeg or b""))
+            else:
+                send(R.T_INFO, json.dumps({"id": rid, "error": f"opération inconnue : {op}"}).encode())
+        except Exception as e:   # noqa: BLE001
+            traceback.print_exc()
+            try:
+                send(R.T_INFO, json.dumps({"id": rid, "error": f"{type(e).__name__}: {e}"}).encode())
+            except Exception:    # noqa: BLE001
+                pass
+
     def cmd_loop() -> None:   # commandes reçues par TCP (poignée de main UDP pas encore faite, ou transport tcp)
         try:
             while not stop.is_set():
                 typ, p = R.recv_msg(conn)
                 if typ == R.T_CMD:
                     handle_cmd(*R.CMD.unpack(p))
+                elif typ == R.T_CTRL:
+                    handle_ctrl(p)
         except (ConnectionError, OSError):
             stop.set()
 
@@ -300,14 +343,16 @@ def main() -> int:
     t_stats = time.monotonic()
     try:
         while not stop.is_set():
-            c = cap.latest(timeout=1.0)
+            c = ctl.latest(timeout=0.2)       # court : une configuration reçue de B est appliquée même si l'écran ne change pas
             if c is None:
                 continue
             ox, oy = c.origin
+            W, H = c.window
             img = c.image
             te = time.perf_counter()
-            if args.resize and img.shape[0] != args.resize:
-                img = cv2.resize(img, (args.resize, args.resize), interpolation=INTERP)
+            rs = ctl.cfg["resize"]
+            if rs and img.shape[0] != rs:
+                img = cv2.resize(img, (rs, rs), interpolation=INTERP)
             h, w = img.shape[:2]
             if codec == R.CODEC_JPEG:
                 ok, buf = cv2.imencode(".jpg", img, enc_params)
@@ -344,7 +389,7 @@ def main() -> int:
         traceback.print_exc()   # os._exit ci-dessous perdrait la trace : un agent qui meurt en silence ressemble à « jeu fermé » côté B
     finally:
         stop.set()
-        cap.stop()
+        ctl.stop()
         if rec is not None:
             rec.close()
         print("agent A : fin", flush=True)

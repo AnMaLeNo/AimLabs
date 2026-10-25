@@ -20,6 +20,7 @@ outils expriment le même besoin, c'est le signe que le jeu (ou le SDK) devrait 
 | `remote/poc/view_check.py` (2026-10-24) | vérifier la fenêtre debug sur la vraie session : captures à chaque étape, touches simulées (envoyées seulement si la fenêtre est au premier plan), survie de B | non : spécifique à la vue |
 | `remote/poc/pm_check.py` (2026-10-24) | savoir sur QUELS cœurs (E / S) tourne chaque configuration (`powermetrics`, `sudo` sans mot de passe pour cette commande) : a réfuté mon hypothèse « la fenêtre reste sur les cœurs d'efficacité » | – |
 | `remote/poc/recinfo.py` | lire un enregistrement (cadence, taille, trous) | – |
+| `remote/poc/capture_ctl.py`, `capture_cfg.py`, `sniper_setup.py`, `capture_ctl_test.py` (2026-10-25) | **cadrer la capture sans éditer le code** : la fenêtre du jeu n'avait qu'un titre exact (« AimLabs (DEBUG) ») et le carré était toujours centré dessus ; maintenant écran ou fenêtre (motif de titre), recadrage à la main et aperçu de ce que reçoit l'algo, depuis B (`sniper_b.py --setup`), avec canal de réglage A↔B (`CTRL/INFO/PREVIEW`) | oui, en partie : un jeu qui annonce lui-même la position de son réticule et de sa fenêtre rendrait le réglage inutile ; en attendant, c'est le seul moyen de cadrer sans rien lire dans le jeu |
 | `remote/sync_mac.sh` | pousser le code vers le Mac (la copie du Mac avait dérivé : `remote.py` et `agent_a.py` en retard) | un `--sync` du dépôt ou un paquet installable |
 
 ## Bogues trouvés en chemin

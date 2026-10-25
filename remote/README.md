@@ -42,7 +42,7 @@ AIMLABS_AUTOSTART=1 venv/bin/python remote/poc/sniper_b.py --connect listen:7777
 
 ```
 godot --path game --always-on-top -- --map=range --mode=remote
-python remote/poc/agent_a.py --connect <ip de B>:7777 --transport tcp --jpeg 60 --crop 384 --resize 256
+python remote/poc/agent_a.py --connect <ip de B>:7777 --transport tcp --jpeg 60 --crop 384 --resize 256    # cadrage : centre de l'ÉCRAN (défaut)
 ```
 
 (`--always-on-top` : une capture d'écran voit ce qui est devant la fenêtre.) Benchmark :
@@ -59,6 +59,29 @@ vitesse). `--bench-wait-client` attend le relais ; garder `--bench-criterion=hit
 rattaché à une image connue du jeu. Pour lancer un algo **existant sans le modifier** sur B :
 `python remote/poc/run_remote_algo.py --connect listen:7777 algos/yolo_sniper.py` (remplace `AimClient` par
 `aimlabs.remote.RemoteClient`).
+
+## Cadrage de la capture : écran ou fenêtre, réglable depuis B (`sniper_b.py --setup`)
+
+L'agent du PC A découpe un **carré de `crop` px** (384 par défaut) centré sur une **référence**, le réduit à `resize` px (le côté du réseau de B, imposé par B) et l'envoie.
+La référence est **le centre de l'écran** par défaut (aucune fenêtre n'est cherchée), ou **une fenêtre** trouvée par un motif de son titre.
+
+| Côté | Réglage |
+|---|---|
+| A (au lancement) | `--capture-mode screen\|window`, `--monitor N`, `--window MOTIF` (implique le mode fenêtre), `--window-process godot`, `--crop`, `--resize`, `--offset dx,dy` |
+| B (à chaud, via le canal de réglage) | `sniper_b.py --setup` (fenêtre de réglage), ou sans fenêtre : `--capture-config ~/.aimlabs/capture.json`, `--capture-mode`, `--capture-window`, `--capture-process`, `--capture-monitor`, `--capture-crop`, `--capture-offset dx,dy` |
+
+* **Le motif de titre** ne demande plus le titre exact : casse ignorée, « identique » > « commence par » > « contient », puis la plus grande fenêtre ; `--window-process godot` départage deux
+  fenêtres au même titre (l'éditeur « AimLabs - Visual Studio Code » contient aussi « AimLabs »). Si la fenêtre bouge, la capture la suit (≤ 250 ms) ; si elle disparaît, la dernière zone est gardée
+  et B est prévenu (`found: false`). *Fenêtré, le centre de la zone cliente est ~24 px plus haut que le centre de l'écran (barre de titre) : choisir le mode fenêtre ou décaler.*
+* **Parcours** : lancer l'agent sur le PC A (écran, centre) ; lancer `sniper_b.py ... --setup` sur le Mac : la fenêtre « Réglage de la capture » s'ouvre avec, à gauche, l'aperçu de toute la référence et le carré
+  vert qui sera découpé, à droite l'image réellement reçue par B (ce que verra l'algo), la configuration et la liste des fenêtres du PC A. Souris : glisser = déplacer le carré, clic sur une fenêtre = la choisir.
+  Clavier : flèches 1 px, `i j k l` 10 px, `+`/`-` taille, `c` centre, `m` écran ⇄ fenêtre, `[ ]` fenêtre précédente/suivante, `t` saisir le motif, `r` rafraîchir, **Entrée valide** (écrit `~/.aimlabs/capture.json`,
+  la fenêtre se ferme, l'algo tourne normalement), Échap annule. Chaque changement est appliqué tout de suite par l'agent (recadrage à chaud ≈ 100 ms) : l'image de droite est toujours le résultat réel.
+  Les prochaines fois : `--setup` repart de la configuration enregistrée ; `--capture-config` l'applique sans fenêtre.
+* **Protocole** (TCP, facultatif : `HELLO.ctrl = true`) : B → A `CTRL` json `{id, op: get_info | get_preview | set}` ; A → B `INFO` json `{id, …}` ou `PREVIEW` `<u32 n>` + json + JPEG de la référence.
+  Un agent sans ce canal (`replay_agent.py`, ou l'agent d'un joueur) reste utilisable : B ignore alors le cadrage. L'en-tête de chaque image porte la taille de la référence (`W×H`) et la position du carré dedans.
+* Tests : `python remote/poc/capture_ctl_test.py` (géométrie, choix de fenêtre, puis agent local de bout en bout : recadrage à chaud, suivi d'une fenêtre déplacée, aperçu, valeurs absurdes) ;
+  `python remote/poc/sniper_setup.py --connect HOTE:PORT --snap fenetre.png` écrit une copie de la fenêtre de réglage sans écran.
 
 ## Mode debug de B : `sniper_b.py --view`
 

@@ -171,6 +171,34 @@ class Track:
         return vx, vy, max(rx, ry)
 
 
+def setup_capture(c, a, side_net):
+    """Cadrage de la capture du PC A (agents qui proposent le canal de réglage ; les autres, comme replay_agent.py, sont laissés tels quels).
+    Priorité : drapeaux > --capture-config (ou fichier enregistré si --setup) > état de l'agent. Le côté de l'image envoyée est toujours celui du réseau de B."""
+    if not c.has_ctrl:
+        if a.setup or a.capture_config or a.capture_window or a.capture_mode:
+            print("sniper_b : cet agent n'a pas de canal de réglage de la capture : cadrage ignoré", flush=True)
+        return
+    import sniper_setup as SS
+    flags = {"mode": a.capture_mode, "title": a.capture_window, "process": a.capture_process, "monitor": a.capture_monitor, "crop": a.capture_crop}
+    if a.capture_window and not a.capture_mode:
+        flags["mode"] = "window"
+    if a.capture_offset:
+        flags["dx"], flags["dy"] = (int(v) for v in a.capture_offset.split(","))
+    saved = SS.load_cfg(a.capture_config) if a.capture_config else (SS.load_cfg() if a.setup else None)
+    if a.capture_config and saved is None:
+        print(f"sniper_b : ATTENTION, {a.capture_config} illisible : cadrage de l'agent conservé", flush=True)
+    cfg = SS.initial_config(c, saved, flags)
+    cfg["resize"] = side_net
+    if a.setup:
+        cfg = SS.run_setup(c, cfg, side_net) or SS.initial_config(c)
+    elif not (saved or any(v is not None for v in flags.values())) and (c.hello.get("capture") or {}).get("config", {}).get("resize") == side_net:
+        return                                              # rien à changer
+    r = c.ctrl("set", config=cfg)
+    info = r[0] if r else {}
+    print(f"sniper_b : capture {cfg['mode']}" + (f" « {cfg['title']} »" if cfg["mode"] == "window" else "") + f", carré {cfg['crop']} px → {side_net}, "
+          f"décalage {cfg['dx']:+d},{cfg['dy']:+d}" + ("" if info.get("found", True) else f" — ATTENTION : {info.get('error')}"), flush=True)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--connect", default=os.environ.get("AIMLABS_REMOTE", "listen:7777"))
@@ -196,6 +224,14 @@ def main(argv=None):
     ap.add_argument("--bias-ms", type=float, default=None, help="tir programmé : décalage ajouté à l'instant visé (calibration ; défaut −1 par l'agent A, 0 par le Pi)")
     ap.add_argument("--vmin", type=float, default=60.0, help="vitesse (px réseau/s) en dessous de laquelle on tire immédiatement")
     ap.add_argument("--horizon", type=float, default=0.4, help="on ne programme pas un tir plus lointain (s)")
+    ap.add_argument("--setup", action="store_true", help="avant de démarrer : fenêtre de réglage du cadrage de la capture du PC A (image envoyée, fenêtre ou écran, recadrage à la main) ; Entrée valide, l'algo tourne ensuite normalement")
+    ap.add_argument("--capture-config", default="", help="fichier JSON de cadrage à appliquer à l'agent sans fenêtre (celui qu'écrit --setup : ~/.aimlabs/capture.json)")
+    ap.add_argument("--capture-mode", choices=["screen", "window"], default=None, help="cadrage imposé à l'agent : centre de l'ÉCRAN ou d'une FENÊTRE")
+    ap.add_argument("--capture-window", default=None, help="motif du titre de la fenêtre (« AimLabs ») ; implique --capture-mode window")
+    ap.add_argument("--capture-process", default=None, help="processus de la fenêtre (« godot »)")
+    ap.add_argument("--capture-monitor", type=int, default=None)
+    ap.add_argument("--capture-crop", type=int, default=None, help="côté (px) du carré découpé")
+    ap.add_argument("--capture-offset", default=None, help="« dx,dy » : décalage du carré par rapport au centre")
     ap.add_argument("--stats", type=float, default=5.0)
     ap.add_argument("--debug", action="store_true", help="journal texte image par image (ralentit : préférer --view)")
     ap.add_argument("--view", action="store_true", help="mode debug : fenêtre « ce que voit l'IA » (processus séparé, sans coût pour B)")
@@ -277,6 +313,7 @@ def main(argv=None):
                 return True                                 # le jeu ne reçoit aucune marque : critère « hit »
             ret_s = (a.pi_return_ms + a.pi_lead_ms) / 1e3  # l'ordre doit arriver avant (échéance − avance Bluetooth)
         print("sniper_b : connecté, mode", c.mode, flush=True)
+        setup_capture(c, a, side_net)
         while True:
             fr = c.crop(timeout=2.0)
             if fr is None:
