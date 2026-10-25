@@ -20,11 +20,12 @@ pont interne du jeu publie chaque image rendue (~500/s).
 """
 import argparse
 import ctypes
+import os
 import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -55,6 +56,140 @@ def _window_client_rect(title: str) -> Tuple[int, int, int, int]:
     return pt.x, pt.y, rc.right, rc.bottom
 
 
+_dpi_done = False
+
+
+def _win32():
+    """user32 / kernel32 / dwmapi avec des signatures explicites (les handles font 64 bits : sans cela ctypes les tronque) ; process « DPI aware »
+    pour que toutes les coordonnées soient en pixels physiques, comme celles de dxcam."""
+    global _dpi_done
+    from ctypes import wintypes
+    u32, k32, dwm = ctypes.windll.user32, ctypes.windll.kernel32, ctypes.windll.dwmapi
+    if not _dpi_done:
+        u32.SetProcessDPIAware()
+        _dpi_done = True
+    u32.EnumWindows.argtypes = [ctypes.c_void_p, wintypes.LPARAM]
+    u32.IsWindowVisible.argtypes = [wintypes.HWND]
+    u32.IsIconic.argtypes = [wintypes.HWND]
+    u32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
+    u32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    u32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    u32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    u32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return u32, k32, dwm, wintypes
+
+
+def list_windows(min_w: int = 160, min_h: int = 120) -> List[dict]:
+    """Fenêtres de premier niveau visibles, avec un titre, non réduites, non « cloaked » (applications UWP cachées) :
+    [{hwnd, title, process (nom de l'exécutable), rect = (x, y, w, h) de la zone cliente en pixels écran}]."""
+    u32, k32, dwm, wt = _win32()
+    out: List[dict] = []
+
+    def cb(hwnd, _lparam):
+        if not u32.IsWindowVisible(hwnd) or u32.IsIconic(hwnd):
+            return True
+        n = u32.GetWindowTextLengthW(hwnd)
+        if n <= 0:
+            return True
+        cloaked = wt.BOOL(0)
+        dwm.DwmGetWindowAttribute(wt.HWND(hwnd), 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked))   # DWMWA_CLOAKED
+        if cloaked.value:
+            return True
+        buf = ctypes.create_unicode_buffer(n + 1)
+        u32.GetWindowTextW(hwnd, buf, n + 1)
+        rc, pt = wt.RECT(), wt.POINT(0, 0)
+        u32.GetClientRect(hwnd, ctypes.byref(rc))
+        u32.ClientToScreen(hwnd, ctypes.byref(pt))
+        if rc.right < min_w or rc.bottom < min_h:
+            return True
+        pid, proc = wt.DWORD(0), ""
+        u32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        h = k32.OpenProcess(0x1000, False, pid.value)          # PROCESS_QUERY_LIMITED_INFORMATION
+        if h:
+            sz = wt.DWORD(520)
+            pb = ctypes.create_unicode_buffer(520)
+            if k32.QueryFullProcessImageNameW(h, 0, pb, ctypes.byref(sz)):
+                proc = os.path.basename(pb.value)
+            k32.CloseHandle(h)
+        out.append({"hwnd": int(hwnd), "title": buf.value, "process": proc, "rect": (pt.x, pt.y, rc.right, rc.bottom)})
+        return True
+
+    proto = ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    keep = proto(cb)                                            # référence gardée vivante pendant l'énumération
+    u32.EnumWindows(keep, 0)
+    return out
+
+
+def window_rect(hwnd: int) -> Optional[Tuple[int, int, int, int]]:
+    """Zone cliente (x, y, w, h) d'une fenêtre DÉJÀ identifiée : quelques microsecondes, donc utilisable pour la suivre pendant la capture
+    (une énumération complète de toutes les fenêtres coûte plusieurs ms). None si elle n'existe plus ou est réduite."""
+    u32, _k32, _dwm, wt = _win32()
+    u32.IsWindow.argtypes = [wt.HWND]
+    if not u32.IsWindow(hwnd) or u32.IsIconic(hwnd):
+        return None
+    rc, pt = wt.RECT(), wt.POINT(0, 0)
+    u32.GetClientRect(hwnd, ctypes.byref(rc))
+    u32.ClientToScreen(hwnd, ctypes.byref(pt))
+    return (pt.x, pt.y, rc.right, rc.bottom) if rc.right > 0 and rc.bottom > 0 else None
+
+
+def window_rank(pattern: str, title: str) -> Optional[int]:
+    """0 = titre identique, 1 = commence par le motif, 2 = le contient (sans tenir compte de la casse) ; None = ne correspond pas."""
+    p, t = pattern.casefold().strip(), title.casefold()
+    if not p:
+        return None
+    if t == p:
+        return 0
+    if t.startswith(p):
+        return 1
+    return 2 if p in t else None
+
+
+def find_window(pattern: str, process: str = "", windows: Optional[List[dict]] = None) -> Optional[dict]:
+    """La fenêtre qui correspond le mieux au motif de titre : d'abord le meilleur rang (identique > commence par > contient), puis la plus grande.
+    `process` (sous-chaîne du nom de l'exécutable, ex. « godot ») départage deux fenêtres de même titre (l'éditeur de code d'un projet « AimLabs »
+    porte aussi « AimLabs » dans son titre)."""
+    best = None
+    for w in (windows if windows is not None else list_windows()):
+        r = window_rank(pattern, w["title"])
+        if r is None or (process and process.casefold() not in w["process"].casefold()):
+            continue
+        key = (r, -w["rect"][2] * w["rect"][3])
+        if best is None or key < best[0]:
+            best = (key, w)
+    return best[1] if best else None
+
+
+def monitors() -> List[dict]:
+    """Écrans : [{index, rect = (x, y, w, h) en pixels du bureau virtuel, primary}], l'écran principal en premier (index 0)."""
+    u32, _k32, _dwm, wt = _win32()
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wt.DWORD), ("rcMonitor", wt.RECT), ("rcWork", wt.RECT), ("dwFlags", wt.DWORD)]
+
+    out: List[dict] = []
+
+    def cb(hmon, _hdc, _rc, _lparam):
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        u32.GetMonitorInfoW(hmon, ctypes.byref(mi))
+        r = mi.rcMonitor
+        out.append({"rect": (r.left, r.top, r.right - r.left, r.bottom - r.top), "primary": bool(mi.dwFlags & 1)})
+        return True
+
+    proto = ctypes.WINFUNCTYPE(ctypes.c_int, wt.HANDLE, wt.HDC, ctypes.POINTER(wt.RECT), wt.LPARAM)
+    keep = proto(cb)
+    u32.EnumDisplayMonitors(None, None, keep, 0)
+    out.sort(key=lambda m: (not m["primary"], m["rect"][0], m["rect"][1]))
+    for i, m in enumerate(out):
+        m["index"] = i
+    return out
+
+
 class ScreenCapture:
     def __init__(self, title: str = WINDOW_TITLE, crop: Optional[int] = 240, backend: str = "auto",
                  region: Optional[Tuple[int, int, int, int]] = None, color: str = "RGB"):
@@ -63,6 +198,8 @@ class ScreenCapture:
         ou « BGR » (ordre natif de l'écran et d'OpenCV : évite une conversion si on encode ensuite en JPEG)."""
         self.color = color
         self.title, self.crop, self.backend_name, self.manual_region = title, crop, backend, region
+        self._requested = backend      # `backend_name` devient « dxcam » ou « mss » une fois démarré : on garde la demande d'origine pour recadrer
+        self._cam_obj = None           # caméra dxcam, créée une seule fois (une seule duplication d'écran possible par sortie)
         self._cam = None
         self._sct = None
         self._count = 0
@@ -88,33 +225,45 @@ class ScreenCapture:
     def start(self) -> "ScreenCapture":
         x, y, w, h = self._compute_region()
         self._region = (x, y, w, h)
-        backend = self.backend_name
+        backend = self._requested
         if backend in ("auto", "dxcam"):
             try:
                 import dxcam
-                cam = dxcam.create(output_color=self.color)
+                if self._cam_obj is None:
+                    self._cam_obj = dxcam.create(output_color=self.color)
+                cam = self._cam_obj
                 if x >= 0 and y >= 0 and x + w <= cam.width and y + h <= cam.height:
                     cam.start(region=(x, y, x + w, y + h), target_fps=0, video_mode=False)
                     self._cam = cam
                     self.backend_name = "dxcam"
                     return self
                 if backend == "dxcam":
-                    raise RuntimeError("la fenêtre n'est pas sur l'écran principal : utilise --backend mss")
+                    raise RuntimeError("la zone n'est pas sur l'écran principal : utilise --backend mss")
             except ImportError:
                 if backend == "dxcam":
                     raise
         import mss
-        self._sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
+        if self._sct is None:
+            self._sct = mss.MSS() if hasattr(mss, "MSS") else mss.mss()
         self.backend_name = "mss"
         return self
 
-    def stop(self) -> None:
+    def retarget(self, region: Tuple[int, int, int, int]) -> "ScreenCapture":
+        """Change la zone capturée (x, y, w, h en pixels écran) sans recréer la capture : arrêt et redémarrage de dxcam (≈ 100 ms) sur la même caméra."""
+        self.manual_region = region
+        self.stop(keep=True)
+        return self.start()
+
+    def stop(self, keep: bool = False) -> None:
+        """`keep=True` : on arrête seulement la capture en cours (avant de la redémarrer ailleurs) ; sinon on libère tout."""
         if self._cam is not None:
             self._cam.stop()
             self._cam = None
-        if self._sct is not None:
-            self._sct.close()
-            self._sct = None
+        if not keep:
+            if self._sct is not None:
+                self._sct.close()
+                self._sct = None
+            self._cam_obj = None
 
     def __enter__(self) -> "ScreenCapture":
         return self.start()

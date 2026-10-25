@@ -11,6 +11,7 @@ Protocole (octets little-endian, un seul flux TCP, TCP_NODELAY) : chaque message
   A → B  FRAME  <QQHHHHHHB> frame_id, capture_usec, W, H, x0, y0, cw, ch, codec + pixels (0 = RGB brut, 1 = JPEG)
                  (la région (x0, y0, cw, ch) de la fenêtre W×H ; le reste de l'image n'est pas transmis)
   A → B  STATE  json : touches / clavier / souris du jeu + mesures de l'agent (`time_usec`, `fps`)
+  B → A  CTRL   json {id, op: get_info|get_preview|set, …} ; A → B INFO json {id, …} / PREVIEW <u32 n> json JPEG : réglage de la capture (facultatif, HELLO.ctrl)
   B → A  CMD    <BQff> type (1 move, 2 fire, 3 mark, 4 fire_at, 5 cancel), frame_id, dx, dy
                  fire_at : l'agent tire à (capture de frame_id + dx ms) sur SON horloge : l'instant est décidé par B,
                  exécuté avec la précision de A, indépendamment du retard et de la gigue du réseau
@@ -31,6 +32,8 @@ from .client import Frame, Keys
 
 VERSION = 1
 T_HELLO, T_FRAME, T_STATE, T_CMD = 1, 2, 3, 4
+# Canal de réglage de la capture (TCP seulement, facultatif : HELLO porte "ctrl": true si l'agent le comprend) :
+T_CTRL, T_INFO, T_PREVIEW = 5, 6, 7   # B → A json {"id", "op": get_info|get_preview|set, ...} ; A → B json {"id", ...} ; A → B <I longueur json> json + JPEG
 CMD_MOVE, CMD_FIRE, CMD_MARK = 1, 2, 3
 CMD_FIRE_AT, CMD_CANCEL = 4, 5   # tir programmé (dx = délai en ms après la capture de frame_id) / annulation
 CODEC_RAW, CODEC_JPEG = 0, 1
@@ -106,7 +109,9 @@ class RemoteClient:
         self._sock.settimeout(None)
         self._sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self._send_lock = threading.Lock()
-        self._peer = None               # adresse UDP de l'agent une fois la poignée de main UDP faite
+        self._replies = {}              # id de requête de contrôle -> (réponse json, jpeg|None)
+        self._ctl_id = 0
+        self._peer = None             # adresse UDP de l'agent une fois la poignée de main UDP faite
         self._cmd_seq = 0
         self._reasm = {}                # seq -> [n, {idx: bytes}] pour les messages UDP
         self.rx_time = 0.0              # horloge locale (monotonic) à la réception de la dernière image
@@ -159,6 +164,15 @@ class RemoteClient:
             st = json.loads(bytes(p))
             with self._cond:
                 self._state, self._state_rx = st, time.monotonic()
+                self._cond.notify_all()
+        elif typ in (T_INFO, T_PREVIEW):
+            if typ == T_INFO:
+                reply, jpeg = json.loads(bytes(p)), None
+            else:
+                n = struct.unpack_from("<I", p, 0)[0]
+                reply, jpeg = json.loads(bytes(p[4:4 + n])), bytes(p[4 + n:])
+            with self._cond:
+                self._replies[reply.get("id")] = (reply, jpeg)
                 self._cond.notify_all()
 
     def _rx_loop(self) -> None:
@@ -290,6 +304,27 @@ class RemoteClient:
             return True
         except OSError:
             return False
+
+    # ---------------------------------------------------------------- réglage de la capture (agent qui le propose)
+    @property
+    def has_ctrl(self) -> bool:
+        return bool(self.hello.get("ctrl"))
+
+    def ctrl(self, op: str, timeout: float = 3.0, **kw):
+        """Demande `op` (get_info, get_preview, set) à l'agent et attend sa réponse : (json, jpeg|None), ou None au timeout / sans canal de réglage."""
+        if not self.has_ctrl:
+            return None
+        with self._cond:
+            self._ctl_id += 1
+            rid = self._ctl_id
+        try:
+            with self._send_lock:
+                send_msg(self._sock, T_CTRL, json.dumps({"id": rid, "op": op, **kw}).encode())
+        except OSError:
+            return None
+        with self._cond:
+            self._cond.wait_for(lambda: rid in self._replies or self._closed, timeout)
+            return self._replies.pop(rid, None)
 
     def move(self, dx: float, dy: float, frame_id: Optional[int] = None) -> bool:
         return self._push(CMD_MOVE, dx, dy, frame_id)

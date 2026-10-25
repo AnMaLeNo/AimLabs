@@ -182,14 +182,30 @@ def main(argv=None):
     ap.add_argument("--track", type=int, default=2)
     ap.add_argument("--lead-scale", type=float, default=1.0)
     ap.add_argument("--cooldown", type=float, default=1.0)
-    ap.add_argument("--extra-ms", type=float, default=6.5, help="tir immédiat de repli : latence non mesurée par B (retour B→A + application dans le jeu) ajoutée au temps écoulé")
+    ap.add_argument("--extra-ms", type=float, default=None, help="tir immédiat de repli : latence non mesurée par B (retour B→A + application dans le jeu) ajoutée au temps écoulé (défaut 6,5 ; par le Pi : --pi-return-ms + --pi-lead-ms)")
+    ap.add_argument("--fire-via", default="remote", help="remote : ordres renvoyés à l'agent du PC A (SDK) ; pi:HOTE[:PORT] : ordres envoyés au Raspberry Pi, qui appuie sur la touche de tir du jeu par Bluetooth (jeu en mode silent)")
+    ap.add_argument("--pi-usage", type=int, default=None, help="touche HID de tir (défaut : celle des réglages, sinon 10 = G) : doit être la touche de tir du jeu ET figurer dans la liste blanche du Pi")
+    ap.add_argument("--pi-hold-ms", type=float, default=25.0, help="durée d'appui de la touche")
+    ap.add_argument("--pi-lead-ms", type=float, default=4.8, help="latence moyenne Pi -> Bluetooth -> jeu (mesurée : 4,8 ms) : on appuie ce temps plus tôt")
+    ap.add_argument("--pi-return-ms", type=float, default=4.0, help="temps réservé au trajet B -> Pi (réseau) avant l'échéance")
+    ap.add_argument("--pi-late-ms", type=float, default=3.0, help="un ordre arrivé en retard de moins que cela tire tout de suite (plus tard : refusé, l'ordre en attente est conservé)")
     ap.add_argument("--warm", choices=["cpu", "ane", "none"], default="cpu", help="processus qui garde le Mac à pleine vitesse")
     ap.add_argument("--no-schedule", action="store_true", help="tir immédiat dès que c'est sûr (sans tir programmé)")
     ap.add_argument("--lag-ms", type=float, default=3.5, help="délai A→B (encodage + réseau) à ajouter au temps écoulé depuis la réception de l'image")
     ap.add_argument("--return-ms", type=float, default=2.5, help="tir programmé : temps réservé au retour B→A + application avant l'instant visé")
-    ap.add_argument("--bias-ms", type=float, default=-1.0, help="tir programmé : décalage ajouté à l'instant visé (calibration)")
+    ap.add_argument("--bias-ms", type=float, default=None, help="tir programmé : décalage ajouté à l'instant visé (calibration ; défaut −1 par l'agent A, 0 par le Pi)")
     ap.add_argument("--vmin", type=float, default=60.0, help="vitesse (px réseau/s) en dessous de laquelle on tire immédiatement")
     ap.add_argument("--horizon", type=float, default=0.4, help="on ne programme pas un tir plus lointain (s)")
+    ap.add_argument("--setup", action="store_true", help="avant de démarrer : fenêtre de RÉGLAGES (cadrage de la capture du PC A, touches d'entrée et de sortie) ; Entrée valide et enregistre dans ~/.aimlabs/sniper_b.json, l'algo tourne ensuite normalement")
+    ap.add_argument("--settings", nargs="?", const="", default=None, metavar="FICHIER", help="applique les réglages enregistrés (défaut : ~/.aimlabs/sniper_b.json) sans ouvrir la fenêtre")
+    ap.add_argument("--keys", choices=["auto", "pi", "game"], default="auto", help="d'où viennent les touches de commande : le clavier vu par le Pi (auto avec --fire-via pi:…) ou les touches que le jeu publie en mode remote")
+    ap.add_argument("--capture-config", default="", help="fichier JSON de cadrage à appliquer à l'agent (écrit par sniper_setup.py ou par --setup : entrée « capture »)")
+    ap.add_argument("--capture-mode", choices=["screen", "window"], default=None, help="cadrage imposé à l'agent : centre de l'ÉCRAN ou d'une FENÊTRE")
+    ap.add_argument("--capture-window", default=None, help="motif du titre de la fenêtre (« AimLabs ») ; implique --capture-mode window")
+    ap.add_argument("--capture-process", default=None, help="processus de la fenêtre (« godot »)")
+    ap.add_argument("--capture-monitor", type=int, default=None)
+    ap.add_argument("--capture-crop", type=int, default=None, help="côté (px) du carré découpé")
+    ap.add_argument("--capture-offset", default=None, help="« dx,dy » : décalage du carré par rapport au centre")
     ap.add_argument("--stats", type=float, default=5.0)
     ap.add_argument("--debug", action="store_true", help="journal texte image par image (ralentit : préférer --view)")
     ap.add_argument("--view", action="store_true", help="mode debug : fenêtre « ce que voit l'IA » (processus séparé, sans coût pour B)")
@@ -202,6 +218,11 @@ def main(argv=None):
     ap.add_argument("--view-linger", type=float, default=5.0, help="secondes pendant lesquelles la fenêtre reste ouverte après l'arrêt de B")
     ap.add_argument("--view-qos", choices=["background", "utility", "default", "initiated"], default="utility", help="priorité du processus de la fenêtre (macOS : règle aussi la marge des minuteries)")
     a = ap.parse_args(argv)
+    via_pi = a.fire_via.startswith("pi:")
+    if a.extra_ms is None:
+        a.extra_ms = (a.pi_return_ms + a.pi_lead_ms) if via_pi else 6.5
+    if a.bias_ms is None:
+        a.bias_ms = 0.0 if via_pi else -1.0
 
     qos_interactive()
     sys.setswitchinterval(1e-4)   # bascule de GIL entre threads de réception et de décision : 0,1 ms au lieu de 5 ms
@@ -225,7 +246,15 @@ def main(argv=None):
                        snap_every=a.view_snap_every, headless=a.view_headless, linger=a.view_linger, log=a.view_log, qos=a.view_qos)
         atexit.register(vw.close)
         print(f"sniper_b : vue debug ouverte (processus {vw.proc.pid}, {a.view_fps:.0f} fps, mémoire partagée {vw.shm.name})", flush=True)
-    enabled = os.environ.get("AIMLABS_AUTOSTART") == "1"
+    fx = None
+    if via_pi:                                              # tir par le Raspberry Pi : ordre UDP signé -> Bluetooth HID -> touche de tir du jeu
+        from pi_fire import PiFire
+        host, _, port = a.fire_via[3:].partition(":")
+        fx = PiFire(host, int(port or 7780), usage=a.pi_usage or 10, hold_ms=a.pi_hold_ms, late_ms=a.pi_late_ms)
+        if fx.start(wait_sync=15.0):
+            print(f"sniper_b : tir par le Pi {host} (RTT {fx.rtt_best_ms():.2f} ms, avance {a.pi_lead_ms} ms)", flush=True)
+        else:
+            print(f"sniper_b : ATTENTION, pas de synchronisation avec le Pi {host} (secret, pare-feu, adresse ?) : les tirs programmés seront refusés", flush=True)
     print(f"sniper_b : Core ML {a.units}, réseau {side_net}px, en attente de l'agent du PC A ({a.connect})…", flush=True)
     track, locked, last_fire = None, False, -1e9
     n = n_fire = n_sched = 0
@@ -237,7 +266,35 @@ def main(argv=None):
     lats = []                                        # délais réception→commande de la fenêtre de stats (p99, max)
     t_stats = time.monotonic()
     with RemoteClient(a.connect, timeout=60) as c:
+        if fx is None:                                      # chemin d'origine : commandes renvoyées à l'agent du PC A
+            fire_at, fire_now, cancel_fire, mark = c.fire_at, c.fire, c.cancel_fire, c.mark
+            ret_s = a.return_ms / 1e3
+        else:
+            def fire_at(fid, delay):
+                """`delay` = secondes après la CAPTURE de l'image ; dans l'horloge de B la capture a eu lieu lag_ms avant la réception (rx_last)."""
+                due_mono = rx_last - a.lag_ms / 1e3 + delay
+                return fx.fire_at(due_mono + (time.perf_counter() - time.monotonic()), lead_s=a.pi_lead_ms / 1e3, tag=fid)
+
+            def fire_now(frame_id=None):
+                fx.cancel()                                 # un tir programmé encore en attente ne doit pas partir en plus (annulation envoyée AVANT :
+                return fx.fire_now()                        # le Pi n'annule que les ordres plus anciens que l'annulation)
+
+            def cancel_fire():
+                return True                                 # déjà fait par fire_now
+
+            def mark(frame_id=None, x=0.0, y=0.0):
+                return True                                 # le jeu ne reçoit aucune marque : critère « hit »
+            ret_s = (a.pi_return_ms + a.pi_lead_ms) / 1e3  # l'ordre doit arriver avant (échéance − avance Bluetooth)
         print("sniper_b : connecté, mode", c.mode, flush=True)
+        import sniper_settings as SSET
+        pi_host, _, pi_port = (a.fire_via[3:] if via_pi else "").partition(":")
+        ctl = SSET.phase(c, a, side_net, pi_host or None, int(pi_port or 7780))
+        if fx is not None and a.pi_usage is None and ctl.fire_usage:
+            fx.usage = ctl.fire_usage                       # touche de tir choisie dans les réglages
+        import atexit
+        atexit.register(ctl.close)                          # rend aussitôt au PC les touches que B bloquait
+        bget_auto, bget_hold, msrc = (lambda: ctl.bind.get("auto")), (lambda: ctl.bind.get("hold")), ctl.msrc
+        was_auto = bget_auto()
         while True:
             fr = c.crop(timeout=2.0)
             if fr is None:
@@ -248,11 +305,15 @@ def main(argv=None):
             prev_rx = rx_last
             fid, cap_us, rx, crop, (x0, y0), (W, H) = fr
             rx_last = rx
-            k = c.keys()
-            if "CAPSLOCK" in k.just_pressed:
-                enabled = not enabled
+            if msrc is not None:                            # touches publiées par le jeu : on n'alimente les liaisons qu'aux changements
+                k = c.keys()
+                if k.just_pressed or k.just_released:
+                    msrc.feed_down(k.down)
+            enabled = bget_auto()
+            if enabled != was_auto:
+                was_auto = enabled
                 print("sniper", "ON" if enabled else "OFF", flush=True)
-            active = enabled or "ALT" in k
+            active = enabled or bget_hold()
             now = time.monotonic()
             if now - t_stats > a.stats:
                 if active and n:
@@ -260,6 +321,10 @@ def main(argv=None):
                           f"réception→commande {t_proc / n * 1e3:.2f} ms (p99 {sorted(lats)[int(len(lats) * 0.99)] * 1e3:.2f}, max {max(lats) * 1e3:.2f}) · "
                           f"tirs {n_fire} (programmés {n_sched})"
                           + (f" · vue {t_view / n * 1e6:.0f} µs" if vw is not None else ""), flush=True)
+                if fx is not None:
+                    na, by, late_m, late_x = fx.drain_acks()
+                    print(f"[pi] RTT {fx.rtt_best_ms() or 0:.2f} ms · dérive {fx.stats()['drift_ppm']} ppm · ordres {fx.counters['fires']} · ACK {na} {by}"
+                          + (f" · exécution à +{late_m:.3f} ms (max {late_x:.3f})" if late_m is not None else ""), flush=True)
                 if a.debug and why:
                     print("[raisons]", dict(sorted(why.items())), flush=True)
                 why, why_prev, lats = {}, {}, []
@@ -322,7 +387,7 @@ def main(argv=None):
             ext_now = mask_extent(out0, protos, b, cy, side_net)
             under_now = b[0] <= cx <= b[2] and b[1] <= cy <= b[3] and ext_now is not None and ext_now[0] <= cx <= ext_now[1]
             if under_now:
-                c.mark(frame_id=fid)
+                mark(frame_id=fid)
             else:
                 locked = False
             if sched_t is not None and now >= sched_t + 0.02:       # le tir programmé est parti (horloge locale de B)
@@ -374,11 +439,11 @@ def main(argv=None):
                         print(f"[f] image {fid} tau {tau * 1e3:+.1f} ms v {vx:+.0f} vy {vy:+.0f} res {vel[2]:.1f} écoulé {elapsed * 1e3:.1f} conf {b[4]:.2f} suivi {len(track.hist)} prog {'oui' if sched_t is not None else 'non'}", flush=True)
                     if not (0 < tau < a.horizon):
                         why["tau hors horizon"] = why.get("tau hors horizon", 0) + 1
-                    elif tau < elapsed + a.return_ms / 1e3:
+                    elif tau < elapsed + ret_s:
                         why["trop tard pour programmer"] = why.get("trop tard pour programmer", 0) + 1
-                    if 0 < tau < a.horizon and tau >= elapsed + a.return_ms / 1e3:
+                    if 0 < tau < a.horizon and tau >= elapsed + ret_s:
                         done = True                                # assez tôt pour être programmé
-                        if sure_at(vx * tau, vy * tau) and c.fire_at(fid, tau + a.bias_ms / 1e3):
+                        if sure_at(vx * tau, vy * tau) and fire_at(fid, tau + a.bias_ms / 1e3):
                             sched_t = rx - a.lag_ms / 1e3 + tau              # instant visé sur l'horloge de B
                             ev |= F_SCHED
                             if a.debug:
@@ -388,13 +453,13 @@ def main(argv=None):
                     dx = dy = 0.0
                     if coherent:
                         dx, dy = vel[0] * latency * a.lead_scale, vel[1] * latency * a.lead_scale
-                    if sure_at(dx, dy) and c.fire(frame_id=fid):
+                    if sure_at(dx, dy) and fire_now(frame_id=fid):
                         n_fire += 1
                         last_fire, locked = now, True
                         sched_t = None
                         ev |= F_FIRE
                         fdx, fdy = dx, dy
-                        c.cancel_fire()
+                        cancel_fire()
                         if a.debug:
                             print(f"[tir] image {fid} {'' if under_now else 'anticipé '}conf {b[4]:.2f} avance ({dx:+.1f},{dy:+.1f}) px latence {latency * 1e3:.1f} ms", flush=True)
             tp = time.perf_counter() - t1
