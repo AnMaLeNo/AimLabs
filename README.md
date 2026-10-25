@@ -163,7 +163,7 @@ with AimClient() as c:                 # s'attache à la mémoire partagée "aim
   `capture → application` avec sa propre horloge (affiché dans le HUD et dans `state()`).
 * **Modes de jeu** (`-- --mode=<nom>`) : `full` (défaut), `lowres` (image fournie en 640×360),
   `tiny` (320×180), `aim_only` (tir refusé), `fire_only` (visée refusée), `blind` (pas d'image),
-  `remote` (**deux machines** : le jeu ne publie aucune image, il accepte seulement les commandes ; voir `remote/`).
+  `remote` (**deux machines** : le jeu ne publie aucune image, il accepte seulement les commandes ; voir le dépôt [aimlabs-pipeline](https://github.com/AnMaLeNo/aimlabs-pipeline) : agent du PC A, algo de la machine B, relais clavier / tir du Raspberry Pi).
   Les commandes refusées sont comptées dans `cmds_dropped`. Définis dans `game/scripts/game.gd`.
 * **Profils d'information** (`-- --info=real|training`, ou le menu Échap) : ce que le jeu laisse sortir en plus de
   l'image du mode. **`real`** (défaut pour `--mode=remote`) : *rien* que les touches — le bloc d'état du pont ne contient

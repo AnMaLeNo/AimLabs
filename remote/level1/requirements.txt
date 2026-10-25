@@ -1,4 +1,0 @@
-numpy
-dxcam        # capture DXGI (Windows) ; sinon mss suffit
-mss
-opencv-python-headless   # JPEG (agent) et --save
