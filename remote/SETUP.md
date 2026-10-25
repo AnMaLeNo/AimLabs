@@ -140,7 +140,18 @@ Les touches sont des **usages HID** (page clavier : `A` = 4, `G` = 10, `F1` = 58
 
 ## 4. Impact sur les performances
 
-À remplir après mesure (voir `tools/README.md`, « Réglages et touches »).
+Mesuré le 2026-10-25 (Mac M5, 3 tours entrelacés de 30 s, mêmes images rejouées à ~120 images/s, `remote/poc/ab_bench.py`, ancien `sniper_b` contre le nouveau ; le Mac était en usage normal, charge ~2) :
+
+| | ancien | nouveau |
+|---|---|---|
+| réception → commande (moyenne) | 0,583 ms | 0,591 ms (écart de 8 µs, dans le bruit) |
+| p99 / max | 0,85 / 1,00 ms | 0,81 / 0,94 ms |
+| CPU de B (% d'un cœur) | 8,6 | 8,9 |
+
+* La fenêtre elle-même n'est pas dans cette mesure : elle est fermée avant la boucle (rien ne reste ouvert, aucun fil d'affichage).
+* Dans la boucle de B : lire les deux états de tir coûte **0,35 µs** par image (mesuré), contre un `c.keys()` complet (copie de l'état + ensembles) auparavant ; avec le Pi, `c.keys()` n'est plus appelé du tout.
+* Le flux de touches du Pi (avec le Pi) : un fil de fond qui reçoit un battement toutes les 200 ms et envoie un abonnement par seconde, plus quelques paquets par frappe : **0,000 % d'un cœur** mesuré au repos (60 paquets en 10 s).
+* Non mesuré : B avec le flux du Pi *pendant* un banc de tir complet (le banc rejoué n'a pas de Pi). Le seul coût ajouté y est le fil ci-dessus.
 
 ## 5. Tests
 
