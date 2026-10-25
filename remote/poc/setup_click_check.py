@@ -36,33 +36,30 @@ def main():
     time.sleep(6)
     subprocess.run(["scp", "-q", "-i", A.KEY, os.path.join(ROOT, "remote", "pi", "uinput_keys.py"), f"claude@{PI}:/tmp/uinput_keys.py"])
     mi = "python3 ~/aimlabs-remote/repo/remote/mac_input.py"
+    # Position du contenu mesurée sur une capture réelle (macOS 26.5) : AIMLABS_SETUP_POS=60,80 place la fenêtre à x = 60 et à y = 80 SOUS la barre de menus (33 pt) ;
+    # la barre de titre fait ~32 pt : le contenu commence en (60, 145). Pas de System Events ici (ses requêtes de fenêtres échouent par moments : -1719 / -25211).
+    CX, CY = 60, 145
     job = f"""
-PID=$(pgrep -f '[r]emote/poc/sniper_b.py' | head -1)
-osascript -e "tell application \\"System Events\\" to set frontmost of (first process whose unix id is $PID) to true"
-sleep 1.5
-GEO=$(osascript -e "tell application \\"System Events\\" to tell (first process whose unix id is $PID) to get {{position, size}} of window 1")
-echo "fenêtre : $GEO"
-X=$(echo $GEO | cut -d, -f1); Y=$(echo $GEO | cut -d, -f2); HH=$(echo $GEO | cut -d, -f4 | tr -d ' ')
-CX=$X; CY=$((Y + HH - {H}))                      # origine du contenu (sous la barre de titre)
-echo "contenu : $CX,$CY"
-{mi} drag $((CX+440)) $((CY+380)) $((CX+600)) $((CY+450))
+{mi} click {CX + 300} {CY - 16}                     # barre de titre : active la fenêtre
 sleep 1
-{mi} click $((CX+208)) $((CY+{HEAD}+25))         # onglet « Touches »
+{mi} drag {CX + 440} {CY + 380} {CX + 600} {CY + 450}
 sleep 1
-{mi} click $((CX+755)) $((CY+201))               # case « Tir automatique : bascule »
-sleep 7                                          # le clavier virtuel du Pi appuie sur Pause pendant ce temps
-osascript -e 'tell application "System Events" to key code 36'
+{mi} click {CX + 208} {CY + HEAD + 25}              # onglet « Touches »
+sleep 1
+{mi} click {CX + 755} {CY + 201}                    # case « Tir automatique : bascule »
+sleep 11                                            # le clavier virtuel du Pi appuie sur Pause pendant ce temps (11 s après le départ : le « runner » met quelques secondes à démarrer le job)
+{mi} click {CX + W - 36 - 80} {CY + H - FOOT + 38}  # bouton « Valider »
 sleep 2
 """
-    pi = subprocess.Popen(["ssh", "-i", A.KEY, f"claude@{PI}", "sudo python3 /tmp/uinput_keys.py --keys PAUSE --taps 1 --settle 3"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    r = subprocess.run(["bash", os.path.join(ROOT, "remote", "mac_job.sh")], input=job, capture_output=True, text=True, timeout=120)
-    print(r.stdout.strip())
+    pi = subprocess.Popen(["ssh", "-i", A.KEY, f"claude@{PI}", "sudo python3 /tmp/uinput_keys.py --keys PAUSE --taps 1 --settle 11"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    r = subprocess.run(["bash", os.path.join(ROOT, "remote", "mac_job.sh")], input=job.encode("utf-8"), capture_output=True, timeout=120)      # octets : le mode texte de Windows ajouterait des CR
+    print(r.stdout.decode("utf-8", "replace").strip(), r.stderr.decode("utf-8", "replace").strip()[-400:])
     pi.wait(timeout=30)
     agent.kill()
     out = A.ssh(f"cat {log}; cat ~/.aimlabs/sniper_b.json 2>/dev/null")
     A.ssh("pkill -f '[s]niper_b.py'")
     try:
-        vals = json.loads(out[out.index("{"):])
+        vals = json.loads(out[out.rindex(chr(10) + "{") + 1:])
     except ValueError:
         print(out)
         sys.exit("pas de fichier de réglages : la fenêtre n'a pas été validée")
