@@ -6,6 +6,8 @@ lui-même, avec des étiquettes **exactes** (issues du moteur, jamais d'un modè
 
 ```
 prepare_backgrounds.py  photos de fond (COCO val2017) sans aucune personne  → backgrounds.json
+fetch_coco_negatives.py télécharge des photos COCO train2017 sans personne (v2 : +9 390 fonds après filtre)
+mine_hard_negatives.py  trouve les carrés de ces photos où un modèle voit « une personne » à tort → champ "hard"
 gen_plan.py             tire le plan : personnage, angle, distance, position, éclairage, fond  → plan.json
 game/tools/gen_dataset.gd  (Godot) rend le plan : caméra du joueur resserrée sur le carré, personnage seul sur fond transparent
 compose.py              compose les fonds, calcule les polygones depuis l'alpha, dessine le réticule → jeu 480×480 YOLO-seg
@@ -25,6 +27,22 @@ python tools/detector/make_view.py --src <data>/v1/ds480 --dst <data>/v1/ds256
 python tools/detector/train.py --data <data>/v1/ds256/data.yaml --name v1            # ~1 h sur RTX 3080 (limité par le CPU)
 python tools/detector/evaluate.py --dataset <data>/v1/ds480 --split test --models algos/yolo11n-seg.pt <runs>/v1/weights/best.pt
 ```
+
+## v2 : données lointaines + négatifs difficiles
+
+```sh
+python tools/detector/fetch_coco_negatives.py --annotations <instances_train2017.json> --out <data>/ex_images/train2017_neg --n 10000
+python tools/detector/prepare_backgrounds.py --images <data>/ex_images/train2017_neg --annotations <instances_train2017.json> --only-existing --force-split train --extend <data>/backgrounds/backgrounds.json --out <data>/backgrounds2
+python tools/detector/mine_hard_negatives.py --backgrounds <data>/backgrounds2/backgrounds.json --out <data>/backgrounds2/backgrounds_hard.json        --train-models algos/yolo11n-seg-ft1.pt algos/yolo11n-seg.pt --eval-models algos/yolo11n-seg.pt --k-eval 150
+python tools/detector/gen_plan.py --out <data>/v2/plan.json --backgrounds <data>/backgrounds2/backgrounds_hard.json --train 900 --val 40 --test 60        --neg-frac 0.2 --dmax 70 --far-frac 0.4 --seed 2
+```
+(puis rendu / compose / make_view / train comme ci-dessus, `--epochs 50` ; 33 600 images, rendu 22 min, entraînement 1,45 h.)
+Les photos val / test restent celles de val2017 ; les carrés « difficiles » de val / test sont choisis par le **modèle COCO
+d'origine seul**, donc ni v1 ni v2 ne les ont sélectionnés : comparer leurs fausses détections dessus est équitable.
+Mesuré sur le test v2 (conf ≥ 0,5) : images sans personne « difficiles » 38 % de fausses détections (COCO), 11 % (v1), 9 % (v2) ;
+carrés photo sans personne du test v1 : 6,2 % (v1) → 0 % (v2). Le rappel des personnages lointains **n'a pas bougé** (≥ 30 m : 0,47 → 0,49) :
+il dépend de la taille de la cible à 256 px (surface < 100 px² : 7–16 % retrouvés ; 100–200 px² : 55 % ; > 200 px² : ≥ 88 %),
+pas du nombre d'exemples.
 
 ## Choix (et pourquoi)
 

@@ -64,7 +64,7 @@ def plain_bg(spec: dict, size: int) -> np.ndarray:
 
 
 def photo_bg(spec: dict, images_dir: str, size: int) -> np.ndarray:
-    img = cv2.imread(os.path.join(images_dir, spec["file"]))
+    img = cv2.imread(os.path.join(spec.get("dir", images_dir), spec["file"]))
     x0, y0, side = spec["box"]
     patch = img[y0:y0 + side, x0:x0 + side]
     if spec.get("flip"):

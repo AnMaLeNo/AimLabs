@@ -9,11 +9,13 @@ est un pixel de l'écran 2560×1440. Tout est tiré d'une graine : même graine,
 Ce qui varie (c'est le but : « tous les personnages, tous les angles, toutes les distances, tous les fonds ») :
   * le personnage (29) et son orientation (0–360°, la moitié des tirages proches de « face au joueur » comme dans le
     stand de tir), sa pose (A-pose neutre du stand de tir, ou pose de l'animation de repos à un instant tiré) ;
-  * la distance (2,5–45 m, log-uniforme) et la position dans le carré (de centré à coupé par le bord) ; hauteur
+  * la distance (2,5–45 m, log-uniforme ; `--dmax` / `--far-frac` ajoutent une part de personnages lointains) et la position dans le carré (de centré à coupé par le bord) ; hauteur
     d'œil, FOV, inclinaison de la caméra (±35° au plus : pas de plongée/contre-plongée extrême) ;
   * le fond : le vrai monde du jeu (ciel + sol quadrillé, avec ou sans variations de couleurs/soleil/brouillard),
     une photo sans personne, ou un fond uni / dégradé / bruité ; l'éclairage des personnages suit le fond ;
-  * des figurants (autres personnages, 20 % des images) et des images sans personne (négatifs, ~12 %).
+  * des figurants (autres personnages, 20 % des images) et des images sans personne (négatifs, ~12 %) ;
+  * négatifs difficiles : si backgrounds.json porte des carrés « hard » (mine_hard_negatives.py), une part des négatifs
+    (`neg_hard`) et des fonds de personnages (`hard`) les reprennent.
 
   python gen_plan.py --out plan.json --backgrounds <backgrounds.json> [--train 500 --val 30 --test 30] [--seed 1]
 """
@@ -126,6 +128,11 @@ def main() -> None:
     ap.add_argument("--val", type=int, default=30)
     ap.add_argument("--test", type=int, default=30)
     ap.add_argument("--neg-frac", type=float, default=0.12, help="part d'images sans personne en plus")
+    ap.add_argument("--dmax", type=float, default=45.0, help="distance maximale (m)")
+    ap.add_argument("--far-frac", type=float, default=0.0, help="part des personnages tirés (log-uniforme) entre --far-min et --dmax")
+    ap.add_argument("--far-min", type=float, default=25.0)
+    ap.add_argument("--hard-neg-frac", type=float, default=0.45, help="part des négatifs pris parmi les carrés difficiles")
+    ap.add_argument("--hard-pos-frac", type=float, default=0.10, help="part des personnages posés sur un carré difficile")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--exclude", nargs="*", default=["harbor"], help="personnages à ne pas utiliser (harbor : textures manquantes, blanc)")
     a = ap.parse_args()
@@ -137,7 +144,9 @@ def main() -> None:
     by_split: Dict[str, List[dict]] = {"train": [], "val": [], "test": []}
     for it in bgs["items"]:
         by_split[split_of_bg(it["file"], it["split"])].append(it)
-    print({k: len(v) for k, v in by_split.items()}, f"{len(slugs)} personnages", flush=True)
+    hard_of = {k: [(it, h) for it in v for h in it.get("hard", [])] for k, v in by_split.items()}
+    print({k: len(v) for k, v in by_split.items()}, f"{len(slugs)} personnages ; carrés difficiles", {k: len(v) for k, v in hard_of.items()}, flush=True)
+    opts = dict(dmax=a.dmax, far_frac=a.far_frac, far_min=a.far_min, hard_neg_frac=a.hard_neg_frac, hard_pos_frac=a.hard_pos_frac)
 
     samples: List[dict] = []
     for si, (split, per_agent) in enumerate([("train", a.train), ("val", a.val), ("test", a.test)]):
@@ -147,7 +156,7 @@ def main() -> None:
         plan_agents = [slugs[i % len(slugs)] for i in range(total)] + [None] * n_neg
         rng.shuffle(plan_agents)
         for i, slug in enumerate(plan_agents):
-            samples.append(make_sample(rng, f"{split[0]}{si}{i:06d}", split, slug, slugs, by_split[split], bg_dir, cv2))
+            samples.append(make_sample(rng, f"{split[0]}{si}{i:06d}", split, slug, slugs, by_split[split], hard_of[split], bg_dir, cv2, opts))
     samples = [s for s in samples if s is not None]
     json.dump({"size": CROP, "seed": a.seed, "samples": samples}, open(a.out, "w"))
     kinds: Dict[str, int] = {}
@@ -156,7 +165,8 @@ def main() -> None:
     print(f"{len(samples)} échantillons → {a.out}\n  {kinds}")
 
 
-def make_sample(rng, sid: str, split: str, slug: Optional[str], slugs: List[str], bgs: List[dict], bg_dir: str, cv2) -> Optional[dict]:
+def make_sample(rng, sid: str, split: str, slug: Optional[str], slugs: List[str], bgs: List[dict], hards: List[tuple], bg_dir: str, cv2,
+                opts: dict) -> Optional[dict]:
     fov = float(rng.choice([75.0, 75.0, 75.0, 82.0, rng.uniform(60.0, 95.0)]))
     eye = EYE if rng.random() < 0.7 else float(rng.uniform(0.8, 2.4))
     f = focal_px(fov)
@@ -164,16 +174,25 @@ def make_sample(rng, sid: str, split: str, slug: Optional[str], slugs: List[str]
     negative = slug is None
     r = rng.random()
     if negative:
-        kind = "neg_game" if r < 0.35 else ("neg_photo" if r < 0.85 else "neg_plain")
+        if r < 0.20:
+            kind = "neg_game"
+        elif r < 0.20 + 0.80 * opts["hard_neg_frac"] and hards:
+            kind = "neg_hard"
+        else:
+            kind = "neg_photo" if r < 0.90 else "neg_plain"
     else:
-        kind = "game" if r < 0.40 else ("photo" if r < 0.88 else "plain")
+        hp = opts["hard_pos_frac"] if hards else 0.0
+        kind = "game" if r < 0.40 - hp / 2 else ("hard" if r < 0.40 + hp / 2 else ("photo" if r < 0.88 else "plain"))
     mode = "game" if kind.endswith("game") or kind == "game" else "photo"
     agents: List[dict] = []
     pitch_deg = float(rng.uniform(-12, 12))
     meta: dict = {"split": split, "kind": kind, "eye": eye, "fov": fov}
     if not negative:
         for _ in range(20):
-            d = float(math.exp(rng.uniform(math.log(2.5), math.log(45.0))))
+            if rng.random() < opts["far_frac"]:
+                d = float(math.exp(rng.uniform(math.log(opts["far_min"]), math.log(opts["dmax"]))))
+            else:
+                d = float(math.exp(rng.uniform(math.log(2.5), math.log(min(45.0, opts["dmax"])))))
             lim = 0.2 * CROP if rng.random() < 0.5 else 0.65 * CROP
             ox, oy = float(rng.uniform(-lim, lim)), float(rng.uniform(-lim, lim))
             pl = place(d, ox, oy, eye, f)
@@ -199,12 +218,17 @@ def make_sample(rng, sid: str, split: str, slug: Optional[str], slugs: List[str]
     if mode == "game":
         sample["env"] = rnd_game_env(rng) if rng.random() < 0.4 else {}
         return sample
-    if kind.endswith("photo"):
-        item = bgs[int(rng.integers(len(bgs)))]
-        img = cv2.imread(os.path.join(bg_dir, item["file"]))
-        h, w = img.shape[:2]
-        side = int(min(h, w) * rng.uniform(0.45, 1.0))
-        x0, y0 = int(rng.integers(0, w - side + 1)), int(rng.integers(0, h - side + 1))
+    if kind.endswith("photo") or kind.endswith("hard"):
+        if kind.endswith("hard"):
+            item, hb = hards[int(rng.integers(len(hards)))]
+            x0, y0, side = int(hb[0]), int(hb[1]), int(hb[2])
+            img = cv2.imread(os.path.join(item.get("dir", bg_dir), item["file"]))
+        else:
+            item = bgs[int(rng.integers(len(bgs)))]
+            img = cv2.imread(os.path.join(item.get("dir", bg_dir), item["file"]))
+            h, w = img.shape[:2]
+            side = int(min(h, w) * rng.uniform(0.45, 1.0))
+            x0, y0 = int(rng.integers(0, w - side + 1)), int(rng.integers(0, h - side + 1))
         patch = img[y0:y0 + side, x0:x0 + side]
         flip = bool(rng.random() < 0.5)
         if flip:
@@ -212,7 +236,7 @@ def make_sample(rng, sid: str, split: str, slug: Optional[str], slugs: List[str]
         third = max(side // 3, 1)
         top, mid, bot = mean_rgb(patch[:third]), mean_rgb(patch[third:2 * third]), mean_rgb(patch[2 * third:])
         lum = float(patch.mean() / 255.0)
-        sample["bg"] = {"type": "photo", "file": item["file"], "box": [x0, y0, side], "flip": flip}
+        sample["bg"] = {"type": "photo", "file": item["file"], "dir": item.get("dir", bg_dir), "box": [x0, y0, side], "flip": flip}
     else:
         c1 = hsv(float(rng.uniform(0, 1)), float(rng.uniform(0, 0.9)), float(rng.uniform(0.03, 1.0)))
         c2 = c1 if rng.random() < 0.4 else hsv(float(rng.uniform(0, 1)), float(rng.uniform(0, 0.9)), float(rng.uniform(0.03, 1.0)))

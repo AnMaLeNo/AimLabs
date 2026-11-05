@@ -106,7 +106,7 @@ def main() -> None:
                     pm = [cv2.resize(p.astype(np.uint8), (S, S), interpolation=cv2.INTER_NEAREST).astype(bool) for p in pm]
                 taken = set()
                 matched_pred = 0
-                accs = [groups["tous"]["tous"], groups["fond"][m["kind"].replace("neg_", "") if not m["kind"].startswith("neg") else "sans personnage"]]
+                accs = [groups["tous"]["tous"], groups["fond"][m["kind"].replace("neg_", "") if not m["kind"].startswith("neg") else "sans personnage" + (" difficile" if m["kind"] == "neg_hard" else "")]]
                 if big:
                     accs.append(groups["distance"][bucket_dist(m["dist"])])
                     accs.append(groups["orientation"][bucket_yaw(m["rel_yaw"])])
@@ -151,7 +151,7 @@ def main() -> None:
         results[mp] = {g: {k: v.row() for k, v in d.items()} for g, d in groups.items()}
         print(f"{mp}: {len(metas)} images", flush=True)
     if a.out:
-        json.dump(results, open(a.out, "w"), ensure_ascii=False, indent=1)
+        json.dump(results, open(a.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
     print_tables(results)
 
 
