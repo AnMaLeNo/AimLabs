@@ -44,6 +44,18 @@ carrés photo sans personne du test v1 : 6,2 % (v1) → 0 % (v2). Le rappel des 
 il dépend de la taille de la cible à 256 px (surface < 100 px² : 7–16 % retrouvés ; 100–200 px² : 55 % ; > 200 px² : ≥ 88 %),
 pas du nombre d'exemples.
 
+## Exporter vers le Mac (Core ML) et sniper-rs (ONNX)
+
+* **sniper-rs** : le `.onnx` écrit par `yolo_sniper.py --export --model yolo11n-seg-<nom>.pt` a les mêmes entrées / sorties que
+  `yolo11n-seg_256x256.onnx` (`images` 1×3×256×256 → `output0` 1×116×1344, `output1` 1×32×64×64) : `sniper-rs --model algos/yolo11n-seg-<nom>.onnx`
+  (les variantes `--u8` / `--decode` passent par `algos/rust/sniper-rs/tools/make_gpu_model.py`, non refaites ici).
+* **Mac** : copier le `.pt` sur le Mac et le convertir **sur le Mac** (coremltools), comme `tools/mac_infer_bench.py` :
+  `YOLO("x.pt").export(format="coreml", imgsz=256, half=True, nms=False)` puis renommer en `models/x_256.mlpackage`.
+* **Vérifier** avec `eval_chain.py` : `prepare` (PC) réduit des images de test comme `fit_crop` de sniper_b (plus proche voisin),
+  `run` mesure sur le Mac (`--backend coreml`) et sur le PC (`--backend torch`), `score` donne TPR / FPR du réticule, les faux positifs sur
+  images sans personnage et l'accord des deux backends. Mesuré pour v2 (800 images de test) : Core ML = PyTorch sur 100 % des décisions
+  et des nombres de détections, écart de boîte max 1,1 px.
+
 ## Choix (et pourquoi)
 
 * **Étiquettes = canal alpha du rendu du personnage seul**, avant d'ajouter le fond. Silhouette exacte (bras, jambes, personnage
