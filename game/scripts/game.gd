@@ -13,6 +13,9 @@ extends Node
 ##                         (everything, each source switchable: state, meta, hud, timecode, truth); default real for
 ##                         --mode=remote and --mode=silent, training otherwise
 ##   --info-port=<n> --info-hz=<n>   ground-truth UDP stream (information option "truth"), default 7790 / 240
+##   --behavior=on|off|<file>   the game's own record of how the player plays (mouse, fire button, target visibility, shots),
+##                         for the « human score » (BehaviorLog, tools/behavior/); default on with --mode=silent, off otherwise.
+##                         on = <repo>/behavior_logs/<tag>_<date>.aimbeh, --behavior-tag=<name> (default: the mode name)
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
@@ -80,6 +83,7 @@ signal info_changed
 
 const TimeCodeScript := preload("res://scripts/timecode.gd")
 const TruthStreamScript := preload("res://scripts/truth_stream.gd")
+const BehaviorLogScript := preload("res://scripts/behavior_log.gd")
 
 var bridge: AimBridge
 var runner: AlgoRunner
@@ -89,6 +93,7 @@ var info_profile := "training"
 var info_toggles := { "state": true, "meta": true, "hud": true, "timecode": true, "truth": true }
 var timecode: Control
 var truth: Node
+var behavior: Node
 var _state_blocked := false
 var agent_slug := ""
 var weapon_slug := ""
@@ -139,6 +144,7 @@ func _ready() -> void:
 	bench.setup(self)
 	bench.progress.connect(func(t: String) -> void: hud.bench_text = t)
 	_setup_info()
+	_setup_behavior()
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
@@ -295,6 +301,21 @@ func _setup_info() -> void:
 		else:
 			push_warning("--info: unknown option '%s' (options: %s)" % [p, ", ".join(INFO_KEYS)])
 	set_info_profile(profile)
+
+
+## --behavior=on|off|<file> : the game's own record of how the player plays (BehaviorLog), default on in silent mode.
+func _setup_behavior() -> void:
+	var spec := String(_args.get("--behavior", "on" if mode_name == "silent" or _args.has("--behavior-selftest") else "off"))
+	if spec == "off":
+		return
+	var file := spec
+	if spec == "on" or spec == "true":
+		var tag := String(_args.get("--behavior-tag", mode_name)).validate_filename()
+		file = AlgoRunner._repo_root().path_join("behavior_logs/%s_%s.aimbeh" % [tag, Time.get_datetime_string_from_system().replace(":", "-")])
+	behavior = BehaviorLogScript.new()
+	behavior.name = "BehaviorLog"
+	add_child(behavior)
+	behavior.setup(self, file, _args.has("--behavior-selftest"))
 
 
 func info_on(key: String) -> bool:

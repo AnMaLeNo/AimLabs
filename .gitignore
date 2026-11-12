@@ -31,3 +31,6 @@ algos/*_u8_dec.onnx
 
 # enregistrements de la chaîne distante (agent_a.py --record) : gros, régénérables
 remote/recordings/
+
+# enregistrements de comportement du jeu (BehaviorLog)
+behavior_logs/
