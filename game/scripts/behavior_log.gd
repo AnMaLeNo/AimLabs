@@ -5,13 +5,16 @@ extends Node
 ##
 ##   --behavior=on|off|<file>   default: on with --mode=silent, off otherwise. on = <repo>/behavior_logs/<mode>_<date>.aimbeh
 ##   --behavior-selftest        scripted inputs (range map), then quit: used by tools/behavior/test_behavior.py
+##   --behavior-selftest=arena:<reaction ms>:<seconds>   arena map, a scripted player that fires <reaction ms> after it can see the chest
 ##
 ## What is recorded (clock = Time.get_ticks_usec(), read when the game RECEIVES the event: its resolution is one frame):
 ##   M  real mouse motion (pixels, as the game received it: one event per frame, the OS reports of that frame added up)
 ##   B  fire button / fire key pressed or released
 ##   F  one per rendered frame: view angles, number of visible targets, the target nearest to the reticle (angular offset of
-##      its centre, angular half-size, distance), what is under the reticle (target, zone), look input of an assist program
-##   V  a target becomes visible / stops being visible (on screen, alive, line of sight not blocked by the world)
+##      its centre, angular half-size, distance), what is under the reticle (target, zone), look input of an assist program,
+##      how much of that nearest target can be seen (0–255)
+##   V  a target becomes visible / stops being visible. Visible = alive, shown, on screen and, when the map has walls, at
+##      least one of its test points in line of sight (Enemy.visibility_points: the hitbox capsules, out to their surface)
 ##   S  a shot left the weapon (hit or not, target, zone, kill)
 ##   P  playing (mouse captured) / paused
 ##
@@ -40,9 +43,15 @@ var _visible := {}                # target instance id -> bool
 var _pending_hit := {}            # filled by target_hit, consumed by shot_fired (emitted right after, same call)
 var _records := 0
 var _self_frame := 0
+var _arena_react_ms := -1.0       # selftest on the arena: reaction time of the scripted player (< 0: range selftest)
+var _arena_seconds := 20.0
+var _arena_seen_usec := 0
+var _arena_fired := false
+var _arena_release_frame := -1
+var _arena_t0 := 0
 
 
-func setup(p_game: Node, p_path: String, p_selftest: bool) -> void:
+func setup(p_game: Node, p_path: String, p_selftest: bool, p_selftest_spec := "") -> void:
 	game = p_game
 	path = p_path
 	selftest = p_selftest
@@ -56,8 +65,16 @@ func setup(p_game: Node, p_path: String, p_selftest: bool) -> void:
 	print("BehaviorLog: recording to ", path)
 	_put_playing(player.mouse_captured)
 	if selftest:
-		game.world.set_map("range")
-		game.world.set_pattern("none")
+		var parts := p_selftest_spec.split(":")
+		if parts[0] == "arena":
+			_arena_react_ms = float(parts[1]) if parts.size() > 1 else 0.0
+			_arena_seconds = float(parts[2]) if parts.size() > 2 else 20.0
+			_arena_t0 = Time.get_ticks_usec()
+			get_window().size = Vector2i(1280, 720)      # without a display the window is 64×64: give the scripted player a real field of view
+			game.world.set_map("arena")
+		else:
+			game.world.set_map("range")
+			game.world.set_pattern("none")
 		player.set_mouse_captured(true)
 
 
@@ -66,11 +83,12 @@ func _header() -> Dictionary:
 	var world: World = game.world
 	var vp := get_viewport().get_visible_rect().size
 	return {
-		"version": 1, "started_unix": Time.get_unix_time_from_system(), "t0_usec": Time.get_ticks_usec(),
+		"version": 2, "started_unix": Time.get_unix_time_from_system(), "t0_usec": Time.get_ticks_usec(),
 		"mode": game.mode_name, "info": game.info_profile, "map": world.map, "weapon": game.weapon_slug, "agent": game.agent_slug,
 		"weapon_automatic": player.viewmodel.automatic, "fire_interval_s": player.viewmodel.fire_interval() if player.viewmodel.weapon_slug != "" else 60.0 / player.rounds_per_minute,
 		"sens_deg_per_px": player.sensitivity_deg_per_px, "viewport": [vp.x, vp.y], "fire_key": game.fire_key_name(),
 		"range": { "pattern": world.pattern, "size": world.pattern_size, "speed": world.pattern_speed, "distance": world.range_distance, "target": world.target_slug },
+		"scenario": { "kinds": world.scenario, "seed": world.scenario_seed, "walls": world.has_occluders },
 		"max_fps": Engine.max_fps, "vsync": DisplayServer.window_get_vsync_mode(), "accumulated_input": Input.use_accumulated_input,
 		"selftest": selftest,
 	}
@@ -96,7 +114,10 @@ func _input(event: InputEvent) -> void:
 
 func _process(_delta: float) -> void:
 	if selftest:
-		_selftest_step()
+		if _arena_react_ms >= 0.0:
+			_selftest_arena()
+		else:
+			_selftest_step()
 	var player: Player = game.player
 	if not player.mouse_captured:
 		return
@@ -111,13 +132,16 @@ func _process(_delta: float) -> void:
 	var near_id := -1
 	var near_d := INF
 	var near := [0.0, 0.0, 0.0, 0.0, 0.0]         # off_x, off_y, half_w, half_h (degrees), distance (m)
+	var near_seen := 0                            # 0–255: share of the nearest target's test points in line of sight
+	var walls: bool = game.world.has_occluders
 	var enemies: Array = game.world.enemies
 	for i in enemies.size():
 		var e: Enemy = enemies[i]
 		var feet: Vector3 = e.global_position
 		var top: Vector3 = e.head_position() + Vector3(0.0, 0.12, 0.0)
 		var centre := (feet + top) * 0.5
-		var vis := e.alive
+		var vis := e.alive and e.is_visible_in_tree()
+		var seen := 255
 		if vis:
 			var mn := Vector2(INF, INF)
 			var mx := Vector2(-INF, -INF)
@@ -129,9 +153,14 @@ func _process(_delta: float) -> void:
 				mn = mn.min(s)
 				mx = mx.max(s)
 			vis = vis and screen.intersects(Rect2(mn, mx - mn))
-		if vis:                                      # line of sight: nothing of the WORLD between the camera and the chest
-			var q := PhysicsRayQueryParameters3D.create(from, e.body_position(), WORLD_MASK, [player.get_rid()])
-			vis = space.intersect_ray(q).is_empty()
+		if vis and walls:                            # line of sight: how many test points have nothing of the WORLD in front of them
+			var pts := e.visibility_points(right)
+			var clear := 0
+			for p: Vector3 in pts:
+				if space.intersect_ray(PhysicsRayQueryParameters3D.create(from, p, WORLD_MASK, [player.get_rid()])).is_empty():
+					clear += 1
+			vis = clear > 0
+			seen = clampi(ceili(255.0 * clear / maxi(pts.size(), 1)), 0, 255)
 		var key := e.get_instance_id()
 		if bool(_visible.get(key, false)) != vis:
 			_visible[key] = vis
@@ -150,6 +179,7 @@ func _process(_delta: float) -> void:
 		if d < near_d:
 			near_d = d
 			near_id = i
+			near_seen = seen
 			var dist := from.distance_to(centre)
 			near = [ox, oy, rad_to_deg(atan(HALF_WIDTH_M / maxf(dist, 0.01))), rad_to_deg(atan(feet.distance_to(top) * 0.5 / maxf(dist, 0.01))), dist]
 	var on_id := -1
@@ -173,6 +203,7 @@ func _process(_delta: float) -> void:
 	_buf.put_u8(zone)
 	_buf.put_float(assist.x)
 	_buf.put_float(assist.y)
+	_buf.put_u8(near_seen)
 	_records += 1
 
 
@@ -272,6 +303,38 @@ func _selftest_step() -> void:
 	elif _self_frame == 122:
 		player.set_mouse_captured(true)                                          # what follows is only written by the flush at exit
 	elif _self_frame == 125:
+		get_tree().quit()
+
+
+## Scripted player on the arena: as soon as the target's chest has been in line of sight for <reaction> ms, aim at it and click
+## once (3 frames); again at the next appearance. Quits after <seconds>.
+func _selftest_arena() -> void:
+	_self_frame += 1
+	var player: Player = game.player
+	var target: Enemy = game.world.target
+	var now := Time.get_ticks_usec()
+	if _arena_release_frame == _self_frame:
+		_send_button(false)
+		player.look_at_point(Vector3(0.0, 1.5, -game.world.range_distance))      # back to the middle of the walls, like a player waiting
+	var clear := false
+	if target != null and target.alive and target.is_visible_in_tree():
+		var q := PhysicsRayQueryParameters3D.create(player.camera.global_position, target.body_position(), WORLD_MASK, [player.get_rid()])
+		clear = player.get_world_3d().direct_space_state.intersect_ray(q).is_empty()
+		var cam := player.camera                 # …and it has to be on the screen: the scripted player sees no more than a real one
+		clear = clear and not cam.is_position_behind(target.body_position()) and get_viewport().get_visible_rect().has_point(cam.unproject_position(target.body_position()))
+	if not clear:
+		_arena_seen_usec = 0
+		_arena_fired = false
+	else:
+		if _arena_seen_usec == 0:
+			_arena_seen_usec = now
+		if not _arena_fired and float(now - _arena_seen_usec) / 1000.0 >= _arena_react_ms:
+			_arena_fired = true
+			player.look_at_point(target.body_position())
+			_send_button(true)
+			_arena_release_frame = _self_frame + 3
+	if float(now - _arena_t0) / 1e6 >= _arena_seconds:
+		print("BehaviorLog selftest (arena): %d acts" % game.world.director.acts_done)
 		get_tree().quit()
 
 

@@ -5,7 +5,8 @@
     log.header            # dict (mode, arme, sensibilité, carte…)
     log.motion            # tableau structuré : t (µs), dx, dy                      mouvement réel de la souris (pixels)
     log.button            # t, pressed, key                                         bouton / touche de tir
-    log.frame             # t, yaw, pitch, fov, n_visible, near_id, off_x, off_y, half_w, half_h, dist, on_id, zone, ax, ay
+    log.frame             # t, yaw, pitch, fov, n_visible, near_id, off_x, off_y, half_w, half_h, dist, on_id, zone, ax, ay,
+                          # seen (0–255 : part visible de la cible la plus proche ; à partir de la version 2)
     log.visible           # t, id, visible                                          une cible devient visible / ne l'est plus
     log.shot              # t, hit, id, zone, killed                                un tir est parti
     log.playing           # t, captured                                             en jeu / en pause
@@ -41,25 +42,30 @@ def load(path):
     pos = len(MAGIC) + 4
     header = json.loads(data[pos:pos + n].decode("utf-8"))
     pos += n
-    rows = {name: [] for name, _, _ in RECORDS.values()}
-    sizes = {code: struct.calcsize(fmt) for code, (_, fmt, _) in RECORDS.items()}
+    recs = dict(RECORDS)
+    if int(header.get("version", 1)) >= 2:          # version 2 : l'image porte en plus la part visible de la cible la plus proche
+        name, fmt, dtype = recs[3]
+        recs[3] = (name, fmt + "B", dtype + [("seen", "u1")])
+    rows = {name: [] for name, _, _ in recs.values()}
+    sizes = {code: struct.calcsize(fmt) for code, (_, fmt, _) in recs.items()}
     truncated = False
     while pos < len(data):
         code = data[pos]
-        if code not in RECORDS or pos + 1 + sizes[code] > len(data):
+        if code not in recs or pos + 1 + sizes[code] > len(data):
             truncated = True                    # fichier coupé (jeu tué pendant l'écriture) : on garde ce qui est lisible
             break
-        name, fmt, _ = RECORDS[code]
+        name, fmt, _ = recs[code]
         rows[name].append(struct.unpack_from(fmt, data, pos + 1))
         pos += 1 + sizes[code]
     out = SimpleNamespace(header=header, path=str(path), truncated=truncated)
-    for name, _, dtype in RECORDS.values():
+    for name, _, dtype in recs.values():
         setattr(out, name, np.array(rows[name], dtype=dtype) if rows[name] else np.zeros(0, dtype=dtype))
     return out
 
 
 def save(path, header, records):
     """`records` : liste de (nom, tuple de valeurs), dans l'ordre du temps. Sert aux tests (enregistrements synthétiques)."""
+    header = dict(header, version=1)                # ce format d'écriture est celui de la version 1 (image sans part visible)
     head = json.dumps(header).encode("utf-8")
     with open(path, "wb") as f:
         f.write(MAGIC + struct.pack("<I", len(head)) + head)

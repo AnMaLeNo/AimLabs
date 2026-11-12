@@ -96,6 +96,29 @@ def main():
               f"appuis reconstruits : sur la cible depuis {ps[0]['tot_ms']:.1f} ms puis hors cible ; durées {ps[0]['dur_ms']:.1f} et {ps[1]['dur_ms']:.1f} ms" if len(ps) == 2 else f"appuis : {ps}")
         check(abs(ps[0]["pos"]) < 1.0, f"réticule à {ps[0]['pos']:+.2f} demi-largeur du centre de la cible au premier appui")
 
+    print("arène : apparitions derrière des murs, joueur scénarisé dans le jeu (2 × 20 s)")
+    arena = {}
+    for react in (0, 250):
+        arena[react] = os.path.join(tmp, f"arena{react}.aimbeh")
+        if os.path.exists(a.godot):
+            subprocess.run([a.godot, "--headless", "--path", os.path.join(ROOT, "game"), "--", "--mode=silent", "--seed=3",
+                            f"--behavior-selftest=arena:{react}:20", "--behavior=" + arena[react].replace("\\", "/")],
+                           capture_output=True, text=True, timeout=180, encoding="utf-8", errors="replace")
+    if all(os.path.exists(p) for p in arena.values()):
+        fast, slow = aimbeh.load(arena[0]), aimbeh.load(arena[250])
+        check(fast.header["version"] == 2 and fast.header["map"] == "arena" and fast.header["scenario"]["walls"] is True, "en-tête : version 2, carte arena, murs")
+        ef, es = HS.reactions(fast), HS.reactions(slow)
+        f = fast.frame
+        check(len(ef) >= 5 and len(es) >= 5 and len(np.unique(f["seen"])) > 5 and f["seen"].min() == 0, f"{len(ef)} et {len(es)} apparitions en 20 s ; la part visible de la cible varie ({len(np.unique(f['seen']))} valeurs)")
+        hidden = f["n_visible"] == 0
+        check(0.2 < hidden.mean() < 0.95 and bool(np.all(f["on_id"][hidden] < 0)), f"cible cachée {100 * hidden.mean():.0f} % du temps, jamais sous le réticule quand elle est cachée")
+        rf, rs = HS.reaction_score(ef), HS.reaction_score(es)
+        check(rf["n"] >= 5 and rf["median_ms"] < 100 and rf["score"] < 30, f"joueur qui tire dès qu'il voit le torse : délai médian {rf['median_ms']:.0f} ms, {100 * rf['impossible']:.0f} % sous 100 ms, score de réaction {rf['score']:.0f}/100")
+        check(rs["n"] >= 4 and rs["min_ms"] >= 250 and (rs["score"] is None or rs["score"] == 100), f"joueur qui attend 250 ms : délai minimal {rs['min_ms']:.0f} ms, médian {rs['median_ms']:.0f} ms, score de réaction {rs['score']}")
+        check(all(e["react_ms"] is None or e["react_ms"] <= e["seen_ms"] + 1 for e in ef + es), "un délai de réaction ne dépasse jamais la durée de l'apparition")
+    else:
+        check(False, "les deux parties d'arène n'ont pas été écrites")
+
     print("mécanique du score (enregistrements synthétiques)")
     rng = np.random.default_rng(1)
     human = lambda: (lambda: rng.normal(110, 30), lambda: rng.normal(95, 22))      # noqa: E731
@@ -118,6 +141,7 @@ def main():
     worst = sorted(sb["z"].items(), key=lambda kv: -abs(kv[1]))[:3]
     check({"tot_med", "dur_med"} & {k for k, _ in worst} != set(), "mesures les plus anormales de l'automate : " + ", ".join(f"{k} (z {z:+.0f})" for k, z in worst))
     check(HS.score(aimbeh.load(out), ref)["score"] is None if os.path.exists(out) else True, "trop peu d'appuis : pas de score plutôt qu'un score inventé")
+    check(HS.score(aimbeh.load(paths["h3"]), ref)["reaction"]["score"] is None, "carte sans apparitions : pas de score de réaction, le score global est celui de la référence")
 
     print("\nTOUT EST BON" if not FAILS else f"\n{len(FAILS)} ÉCHEC(S) : " + " ; ".join(FAILS))
     return 1 if FAILS else 0

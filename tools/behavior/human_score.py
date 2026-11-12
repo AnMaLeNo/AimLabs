@@ -2,7 +2,19 @@
 
     python tools/behavior/human_score.py features <partie.aimbeh> [--json]         # ce que le jeu a mesuré, sans jugement
     python tools/behavior/human_score.py fit <humain1.aimbeh> [...] -o ref.json    # référence = parties jouées par un humain
-    python tools/behavior/human_score.py score <partie.aimbeh> --ref ref.json      # score 0–100 + détail par mesure
+    python tools/behavior/human_score.py score <partie.aimbeh> [--ref ref.json]    # score 0–100 + détail par mesure
+
+Deux jugements indépendants, multipliés quand les deux sont disponibles :
+
+A. RÉACTION (absolu, sans référence) : sur une carte où les cibles apparaissent (arena), le jeu sait depuis quand une cible
+   est visible. Pour chaque apparition, délai entre le premier instant où un point de la cible est en vue et l'appui qui a
+   donné le premier tir touchant. Un humain ne peut pas RÉAGIR en moins de ~100 ms (temps de réaction visuel simple mesuré :
+   213–231 ms en moyenne sur 1 469 adultes ; détection du stimulus seule ≈ 130 ms ; en dessous de 100 ms c'est de
+   l'anticipation). Le délai mesuré par le jeu ne compte pas le retard d'affichage, donc il avantage le joueur.
+       score_réaction = 100 × (1 − part des délais < 100 ms − 0,5 × part des délais entre 100 et 150 ms)
+   Un tir dont l'appui a commencé AVANT l'apparition (bouton déjà enfoncé) est compté à part (« pré-tir »), pas comme réaction.
+
+B. RÉFÉRENCE HUMAINE (relatif, avec --ref) : voir ci-dessous.
 
 Principe : pour chaque appui sur le tir, le jeu sait ce que le joueur ne lui dit pas : depuis combien de temps le réticule
 était sur la cible, à quelle vitesse la cible et le réticule se croisaient, combien de temps le bouton est resté enfoncé, où le
@@ -29,6 +41,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aimbeh import load  # noqa: E402
 
 WINDOW = 15                # appuis par fenêtre
+REACT_IMPOSSIBLE_MS = 100.0    # en dessous : pas une réaction humaine (voir A. ci-dessus)
+REACT_SUSPECT_MS = 150.0       # entre les deux : compté pour moitié
+REACT_MIN = 5                  # apparitions touchées nécessaires pour un score de réaction
 GAP_MAX_MS = 2000.0        # deux appuis plus espacés ne font pas partie de la même rafale
 # mesure -> description (une valeur par fenêtre)
 FEATURES = {
@@ -106,6 +121,55 @@ def presses(log):
     return out
 
 
+def reactions(log):
+    """Un dict par APPARITION d'une cible (elle devient visible … elle ne l'est plus) : `start_ms`, `seen_ms` (durée visible),
+    `hit` (un tir l'a touchée pendant ce temps), `react_ms` (délai apparition → appui qui a donné le premier tir touchant ;
+    None si pas touché ou pré-tir), `prefire` (le bouton était déjà enfoncé avant l'apparition)."""
+    vis = log.visible
+    out = []
+    if not len(vis) or not len(log.frame):
+        return out
+    end_log = float(log.frame["t"][-1]) / 1e3
+    shots = log.shot
+    st = shots["t"].astype(np.float64) / 1e3
+    downs = log.button["t"][log.button["pressed"] == 1].astype(np.float64) / 1e3
+    for tid in np.unique(vis["id"]):
+        v = vis[vis["id"] == tid]
+        for k in range(len(v)):
+            if not v["visible"][k]:
+                continue
+            start = float(v["t"][k]) / 1e3
+            end = float(v["t"][k + 1]) / 1e3 if k + 1 < len(v) else end_log
+            ep = dict(id=int(tid), start_ms=start, seen_ms=end - start, hit=False, react_ms=None, prefire=False)
+            m = (st >= start) & (st <= end + 1.0) & (shots["hit"] == 1) & (shots["id"] == tid)
+            if m.any():
+                ep["hit"] = True
+                t_shot = float(st[m][0])
+                j = int(np.searchsorted(downs, t_shot + 0.5)) - 1        # dernier appui avant ce tir
+                if j >= 0:
+                    if downs[j] < start:
+                        ep["prefire"] = True
+                    else:
+                        ep["react_ms"] = float(downs[j] - start)
+            out.append(ep)
+    out.sort(key=lambda e: e["start_ms"])
+    return out
+
+
+def reaction_score(eps):
+    """Jugement A. dict : apparitions, touchées, pré-tirs, délais, parts impossibles / suspectes, score (None s'il y a moins de
+    REACT_MIN délais)."""
+    r = np.array([e["react_ms"] for e in eps if e["react_ms"] is not None])
+    out = dict(appearances=len(eps), hit=int(sum(e["hit"] for e in eps)), prefire=int(sum(e["prefire"] for e in eps)), n=int(len(r)),
+               impossible=None, suspect=None, median_ms=None, min_ms=None, score=None)
+    if len(r):
+        out.update(median_ms=float(np.median(r)), min_ms=float(r.min()),
+                   impossible=float(np.mean(r < REACT_IMPOSSIBLE_MS)), suspect=float(np.mean((r >= REACT_IMPOSSIBLE_MS) & (r < REACT_SUSPECT_MS))))
+    if len(r) >= REACT_MIN:
+        out["score"] = 100.0 * max(0.0, 1.0 - out["impossible"] - 0.5 * out["suspect"])
+    return out
+
+
 def window_features(ps):
     """Les mesures d'une fenêtre d'appuis (dict mesure -> valeur ; NaN quand la fenêtre ne permet pas de la calculer)."""
     f = dict.fromkeys(FEATURES, float("nan"))
@@ -152,6 +216,7 @@ def session_summary(log):
         presses=len(ps), shots=int(len(shots)), hits=int(shots["hit"].sum()) if len(shots) else 0,
         truncated=log.truncated,
         features=window_features(ps) if len(ps) >= 4 else None,
+        reaction=reaction_score(reactions(log)),
     )
 
 
@@ -189,7 +254,17 @@ def score_window(feats, ref):
     return 100.0 * math.exp(-max(0.0, d - 1.0) / 2.0), z
 
 
-def score(log, ref):
+def score(log, ref=None):
+    """Score global = score de réaction × score de référence / 100 (celui des deux qui existe s'il n'y en a qu'un)."""
+    out = _ref_score(log, ref) if ref else dict(score=None, windows=0, presses=len(presses(log)))
+    out["ref_score"] = out["score"]
+    out["reaction"] = reaction_score(reactions(log))
+    parts = [x for x in (out["ref_score"], out["reaction"]["score"]) if x is not None]
+    out["score"] = float(np.prod(parts) / 100.0 ** (len(parts) - 1)) if parts else None
+    return out
+
+
+def _ref_score(log, ref):
     ps = presses(log)
     n = int(ref.get("window", WINDOW))
     ws = windows(ps, n) or ([ps] if len(ps) >= 4 else [])
@@ -207,10 +282,22 @@ def score(log, ref):
                 window_scores=[round(r["score"], 1) for r in rows], z=zs, features=fs)
 
 
+def _print_reaction(r):
+    if not r["appearances"]:
+        return
+    line = f"  apparitions de cible : {r['appearances']}, touchées {r['hit']}, dont pré-tir {r['prefire']}"
+    if r["n"]:
+        line += (f" ; délai apparition → appui : médiane {r['median_ms']:.0f} ms, minimum {r['min_ms']:.0f} ms ; "
+                 f"{100 * r['impossible']:.0f} % sous {REACT_IMPOSSIBLE_MS:.0f} ms, {100 * r['suspect']:.0f} % entre {REACT_IMPOSSIBLE_MS:.0f} et {REACT_SUSPECT_MS:.0f} ms")
+    print(line)
+    print(f"  score de réaction : {r['score']:.0f}/100" if r["score"] is not None else f"  score de réaction : — (il faut au moins {REACT_MIN} apparitions touchées, hors pré-tir)")
+
+
 def _print_features(s):
     print(f"{s['path']}")
     print(f"  mode {s['mode']}, carte {s['map']}, arme {s['weapon']} ; {s['duration_s']:.0f} s en jeu, image {s['frame_ms']:.2f} ms ; "
           f"{s['presses']} appuis, {s['shots']} tirs, {s['hits']} touches" + (" ; FICHIER TRONQUÉ" if s["truncated"] else ""))
+    _print_reaction(s["reaction"])
     if not s["features"]:
         print("  moins de 4 appuis : aucune mesure")
         return
@@ -232,7 +319,7 @@ def main(argv=None):
     a.add_argument("--window", type=int, default=WINDOW)
     a = sub.add_parser("score")
     a.add_argument("logs", nargs="+")
-    a.add_argument("--ref", required=True)
+    a.add_argument("--ref", help="référence faite de parties humaines (fit) ; sans elle, seul le score de réaction est calculé")
     a.add_argument("--json", action="store_true")
     args = ap.parse_args(argv)
     if args.cmd == "features":
@@ -252,8 +339,10 @@ def main(argv=None):
         if ref["windows"] < 10:
             print("  ATTENTION : moins de 10 fenêtres, la référence est fragile")
     else:
-        with open(args.ref, encoding="utf-8") as f:
-            ref = json.load(f)
+        ref = None
+        if args.ref:
+            with open(args.ref, encoding="utf-8") as f:
+                ref = json.load(f)
         out = []
         for p in args.logs:
             r = score(load(p), ref)
@@ -262,9 +351,15 @@ def main(argv=None):
             if args.json:
                 continue
             if r["score"] is None:
-                print(f"{p} : pas assez d'appuis ({r['presses']}) pour un score")
+                print(f"{p} : pas de score (appuis : {r['presses']}, apparitions touchées : {r['reaction']['n']})")
+                _print_reaction(r["reaction"])
                 continue
-            print(f"{p} : score humain {r['score']:.0f}/100  ({r['presses']} appuis, {r['windows']} fenêtres : {r['window_scores']})")
+            print(f"{p} : score humain {r['score']:.0f}/100")
+            _print_reaction(r["reaction"])
+            if r["ref_score"] is None:
+                print("  score de référence : — (pas de --ref, ou trop peu d'appuis)")
+                continue
+            print(f"  score de référence : {r['ref_score']:.0f}/100  ({r['presses']} appuis, {r['windows']} fenêtres : {r['window_scores']})")
             for k, z in sorted(r["z"].items(), key=lambda kv: -abs(kv[1])):
                 rr = ref["features"][k]
                 print(f"  {k:<11} {r['features'][k]:>9.3f}  (humain {rr['median']:.3f} ± {rr['spread']:.3f})  z {z:+6.1f}   {FEATURES[k]}")

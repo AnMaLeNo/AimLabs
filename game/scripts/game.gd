@@ -23,7 +23,9 @@ extends Node
 ##   --python=<cmd>        interpreter used to run algos (default: python3 / python)
 ##   --agent=<slug>        first-person arms (Kingdom Archives agent, default: jett)
 ##   --weapon=<slug>       held weapon (Kingdom Archives weapon, default: classic)
-##   --map=<name>          showcase (default) | range (shooting range, see World)
+##   --map=<name>          showcase (default) | range (shooting range, see World) | arena (walls, a target that appears)
+##   --scenario=<list>     arena: peek | cross | popup | mix (default), or several separated by commas (ScenarioDirector)
+##   --seed=<n>            arena: same sequence of appearances every run (default: different every run)
 ##   --target=<slug>       range: agent used as the moving target (default: jett)
 ##   --pattern=<name>      range: none | line | square | circle (default: line)
 ##   --size=<m>            range: travel (line) / side (square) / radius (circle), default 4
@@ -136,6 +138,10 @@ func _ready() -> void:
 		world.set_range_distance(float(_args["--distance"]))
 	if _args.has("--target"):
 		world.target_slug = String(_args["--target"])
+	if _args.has("--scenario"):
+		world.scenario = String(_args["--scenario"])
+	if _args.has("--seed"):
+		world.scenario_seed = int(_args["--seed"])
 	if _args.has("--map"):
 		world.set_map(String(_args["--map"]))
 	bench = TriggerBench.new()
@@ -315,7 +321,8 @@ func _setup_behavior() -> void:
 	behavior = BehaviorLogScript.new()
 	behavior.name = "BehaviorLog"
 	add_child(behavior)
-	behavior.setup(self, file, _args.has("--behavior-selftest"))
+	var st: Variant = _args.get("--behavior-selftest", "")
+	behavior.setup(self, file, _args.has("--behavior-selftest"), String(st) if typeof(st) == TYPE_STRING else "")
 
 
 func info_on(key: String) -> bool:

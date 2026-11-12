@@ -41,6 +41,7 @@ var _anim: AnimationPlayer
 var _idle := ""
 var _meshes: Array[MeshInstance3D] = []
 var _hitboxes: Array[StaticBody3D] = []
+var _segments: Array = []      # [a, b, radius] of each hitbox capsule, in this node's space (visibility test)
 var _flash_material: StandardMaterial3D
 var _flash_tween: Tween
 var _death_tween: Tween
@@ -159,6 +160,7 @@ func _add_capsule(zone: String, layer: int, a: Vector3, b: Vector3, radius: floa
 	body.add_child(shape)
 	add_child(body)
 	_hitboxes.append(body)
+	_segments.append([a, b, radius])
 
 
 ## Apply damage. Returns true if this hit killed the target.
@@ -203,7 +205,7 @@ func respawn() -> void:
 	_model.position = Vector3.ZERO
 	hp = max_hp
 	alive = true
-	_set_hitboxes_enabled(true)
+	_set_hitboxes_enabled(visible)      # a hidden target (set_shown(false), scenarios) stays out of reach
 	_play_idle()
 	respawned.emit()
 
@@ -212,6 +214,24 @@ func _set_hitboxes_enabled(enabled: bool) -> void:
 	for body in _hitboxes:
 		var zone: String = body.get_meta("zone")
 		body.collision_layer = (LAYER_ENEMY_HEAD if zone == "head" else LAYER_ENEMY_BODY) if enabled else 0
+
+
+## Points whose line of sight tells how much of the target can be seen: for each hitbox capsule, its middle and both ends
+## pushed to the capsule's surface on either side ([param right] = the viewer's right). World space.
+func visibility_points(right: Vector3) -> PackedVector3Array:
+	var out := PackedVector3Array()
+	for seg: Array in _segments:
+		var a := to_global(seg[0])
+		var b := to_global(seg[1])
+		var r: Vector3 = right * float(seg[2])
+		out.append_array([(a + b) * 0.5, a + r, a - r, b + r, b - r])
+	return out
+
+
+## Show / hide the whole target (scenarios: a hidden target cannot be seen nor hit).
+func set_shown(shown: bool) -> void:
+	visible = shown
+	_set_hitboxes_enabled(shown and alive)
 
 
 ## World-space centre of the head hitbox (handy for tests and aim tools).
