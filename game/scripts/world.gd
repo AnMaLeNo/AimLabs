@@ -44,6 +44,10 @@ const ARENA_BEHIND := 1.0     # metres between the walls and the line the target
 var scenario := "mix"         # peek | cross | popup | mix, or a comma-separated list
 var scenario_seed := -1       # < 0: different every run
 var director: Node
+var arena_targets := 1        # how many agents stand behind the walls (bench cases use several)
+var arena_directed := true    # false: no ScenarioDirector, the targets start hidden and wait to be driven (BenchCases)
+var arena_wall_ends: Array = []   # [x, side] of every wall end (side +1 = open space on the +x side)
+var targets: Array[Enemy] = []    # arena: every target, targets[0] == target
 ## True when something of the world can hide a target (walls): visibility then needs line-of-sight tests.
 var has_occluders := false
 
@@ -115,6 +119,8 @@ func _build_map() -> void:
 	target = null
 	mover = null
 	director = null
+	targets.clear()
+	arena_wall_ends = []
 	has_occluders = false
 	match map:
 		"range":
@@ -184,19 +190,31 @@ func _build_arena() -> void:
 	holder.name = "Enemies"
 	add_child(holder)
 	assets_missing = KAAssets.agent_slugs().is_empty()
-	target = Enemy.new()
-	target.name = "Target_%s" % target_slug
-	target.agent_slug = target_slug
-	target.neutral_pose = true
-	target.respawn_delay = 1.2
-	target.position = Vector3(0.0, 0.0, -(range_distance + ARENA_BEHIND))
-	director = ScenarioDirectorScript.new()
-	director.name = "Director"
-	target.add_child(director)
-	holder.add_child(target)
-	# seen from the spawn, a wall end at x hides the target line up to x * (distance + behind) / distance
-	director.configure(scenario, scenario_seed, edges, (range_distance + ARENA_BEHIND) / range_distance, -(range_distance + ARENA_BEHIND))
-	enemies.append(target)
+	arena_wall_ends = edges
+	var slugs: Array = [target_slug]
+	for s: String in ["sova", "viper", "reyna", "neon", "jett"]:      # the other targets are other agents (never « harbor »: broken model)
+		if not slugs.has(s) and KAAssets.agents().has(s):
+			slugs.append(s)
+	for k in arena_targets:
+		var e := Enemy.new()
+		var slug := String(slugs[k % slugs.size()])
+		e.name = "Target%d_%s" % [k, slug]
+		e.agent_slug = slug
+		e.neutral_pose = true
+		e.respawn_delay = 1.2
+		e.position = Vector3(0.0, 0.0, -(range_distance + ARENA_BEHIND + 0.7 * k))
+		if arena_directed and k == 0:
+			director = ScenarioDirectorScript.new()
+			director.name = "Director"
+			e.add_child(director)
+			# seen from the spawn, a wall end at x hides the target line up to x * (distance + behind) / distance
+			director.configure(scenario, scenario_seed, edges, (range_distance + ARENA_BEHIND) / range_distance, -(range_distance + ARENA_BEHIND))
+		else:
+			e.ready.connect(e.set_shown.bind(false))                 # waits hidden until something drives it
+		holder.add_child(e)
+		targets.append(e)
+		enemies.append(e)
+	target = targets[0]
 	targets_rebuilt.emit(enemies)
 
 

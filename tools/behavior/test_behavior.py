@@ -20,6 +20,7 @@ ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, HERE)
 import aimbeh  # noqa: E402
 import human_score as HS  # noqa: E402
+import case_report as CR  # noqa: E402
 
 FAILS = []
 
@@ -118,6 +119,34 @@ def main():
         check(all(e["react_ms"] is None or e["react_ms"] <= e["seen_ms"] + 1 for e in ef + es), "un délai de réaction ne dépasse jamais la durée de l'apparition")
     else:
         check(False, "les deux parties d'arène n'ont pas été écrites")
+
+    print("banc scénarisé : joueur simulé + déclencheur du banc, sans puis avec la règle « visible depuis 150 ms » (2 × ~25 s)")
+    runs = {}
+    for rule in (0, 150):
+        runs[rule] = os.path.join(tmp, f"cases{rule}.aimbeh")
+        if os.path.exists(a.godot):
+            subprocess.run([a.godot, "--headless", "--path", os.path.join(ROOT, "game"), "--", "--mode=silent", "--seed=1", "--case-repeats=3",
+                            "--cases=flick_side,peek_preaim,two_near,sweep", f"--cases-shooter=trigger:0:{rule}", "--behavior=" + runs[rule].replace("\\", "/")],
+                           capture_output=True, text=True, timeout=240, encoding="utf-8", errors="replace")
+    if all(os.path.exists(p) for p in runs.values()):
+        t0, t150 = CR.trials(aimbeh.load(runs[0])), CR.trials(aimbeh.load(runs[150]))
+        s0, s150 = CR.summarize(t0), CR.summarize(t150)
+        check(len(t0) == 12 and len(t150) == 12 and all(t["vu"] is not None and t["dessus"] is not None and t["hit"] for t in t0 + t150),
+              "12 essais marqués par partie ; à chaque essai la cible devient visible, le réticule l'atteint, elle est touchée")
+        check(set(s0) == {"flick_side", "peek_preaim", "two_near", "sweep"}, "les quatre cas demandés sont dans l'enregistrement")
+        check(s0["peek_preaim"]["lt100"] + s0["peek_preaim"]["lt150"] == 3 and s0["two_near"]["react_med"] < 150,
+              f"réticule posé d'avance, sans règle : tirs {s0['peek_preaim']['react_med']:.0f} ms (médiane) après l'apparition — impossible pour un humain")
+        check(all(t["react"] >= 150 for t in t150) and 150 <= s150["peek_preaim"]["react_med"] < 175 and s150["peek_preaim"]["tot_med"] > 10,
+              f"avec la règle : aucun tir avant 150 ms (médiane {s150['peek_preaim']['react_med']:.0f} ms), au prix de {s150['peek_preaim']['tot_med']:.0f} ms d'attente réticule sur la cible")
+        check(300 < s0["flick_side"]["react_med"] < 700 and abs(s0["flick_side"]["react_med"] - s150["flick_side"]["react_med"]) < 40 and s150["flick_side"]["tot_med"] < 10,
+              f"coup de souris du joueur simulé : tir {s0['flick_side']['react_med']:.0f} ms après l'apparition (réaction + geste) ; la règle n'y change rien")
+        check(s150["sweep"]["react_med"] > 800 and s150["sweep"]["tot_med"] < 10, "cible visible depuis longtemps, balayée : tir à l'arrivée du réticule, règle ou pas")
+        b = aimbeh.load(runs[0]).button
+        check(len(b) > 0 and bool(np.all(b["key"] == 2)), "les tirs demandés par un programme sont enregistrés comme tels (appui de type 2)")
+        mo = aimbeh.load(runs[0]).motion
+        check(len(mo) > 200 and bool(np.all(mo["dx"] == np.round(mo["dx"]))), f"le joueur simulé passe par les mouvements de souris ({len(mo)} évènements, pixels entiers)")
+    else:
+        check(False, "les deux parties scénarisées n'ont pas été écrites")
 
     print("mécanique du score (enregistrements synthétiques)")
     rng = np.random.default_rng(1)

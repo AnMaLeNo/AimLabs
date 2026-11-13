@@ -4,12 +4,13 @@
     log = load("behavior_logs/silent_2026-11-12T22-00-00.aimbeh")
     log.header            # dict (mode, arme, sensibilité, carte…)
     log.motion            # tableau structuré : t (µs), dx, dy                      mouvement réel de la souris (pixels)
-    log.button            # t, pressed, key                                         bouton / touche de tir
+    log.button            # t, pressed, key (0 souris, 1 touche, 2 tir demandé par un programme)   bouton / touche de tir
     log.frame             # t, yaw, pitch, fov, n_visible, near_id, off_x, off_y, half_w, half_h, dist, on_id, zone, ax, ay,
                           # seen (0–255 : part visible de la cible la plus proche ; à partir de la version 2)
     log.visible           # t, id, visible                                          une cible devient visible / ne l'est plus
     log.shot              # t, hit, id, zone, killed                                un tir est parti
     log.playing           # t, captured                                             en jeu / en pause
+    log.mark              # t, case, trial, phase, subject, param                   cas scénarisés du banc (BenchCases)
 
 Les temps sont ceux de l'horloge du jeu (µs) au moment où il REÇOIT l'évènement : leur résolution est d'une image.
 """
@@ -29,6 +30,7 @@ RECORDS = {
     4: ("visible", "<QhB", [("t", "u8"), ("id", "i2"), ("visible", "u1")]),
     5: ("shot", "<QBhBB", [("t", "u8"), ("hit", "u1"), ("id", "i2"), ("zone", "u1"), ("killed", "u1")]),
     6: ("playing", "<QB", [("t", "u8"), ("captured", "u1")]),
+    7: ("mark", "<QBHBhf", [("t", "u8"), ("case", "u1"), ("trial", "u2"), ("phase", "u1"), ("subject", "i2"), ("param", "f4")]),
 }
 _BY_NAME = {name: (code, fmt, dtype) for code, (name, fmt, dtype) in RECORDS.items()}
 

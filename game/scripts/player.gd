@@ -46,6 +46,11 @@ var pitch_deg := 0.0
 var recoil_pending_deg := 0.0
 var fire_cooldown := 0.0
 var mouse_captured := false
+## Simulated player (Autopilot): only events tagged SYNTHETIC_DEVICE move the view or fire, and the OS cursor is not grabbed —
+## the real mouse of whoever sits at the PC cannot disturb a scripted run.
+const SYNTHETIC_DEVICE := 31
+var synthetic_only := false
+var synthetic_fire := false
 
 ## Pixels of look input received this frame, per source (for the HUD / bridge).
 var look_delta_this_frame := { LookSource.REAL: Vector2.ZERO, LookSource.ASSIST: Vector2.ZERO }
@@ -80,6 +85,8 @@ func set_weapon(slug: String) -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and mouse_captured:
+		if synthetic_only and event.device != SYNTHETIC_DEVICE:
+			return
 		add_look_delta(event.relative, LookSource.REAL)
 	elif event.is_action_pressed("toggle_mouse"):
 		set_mouse_captured(not mouse_captured)
@@ -115,7 +122,7 @@ func set_mouse_captured(captured: bool) -> void:
 	if captured == mouse_captured:
 		return
 	mouse_captured = captured
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if captured else Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if captured and not synthetic_only else Input.MOUSE_MODE_VISIBLE
 	mouse_capture_changed.emit(captured)
 
 
@@ -149,7 +156,7 @@ func _process(delta: float) -> void:
 
 	# Automatic weapons fire while the button is held, semi-automatic ones once per press
 	# (site AutomaticWeapon flag). Assist requests always count as one press.
-	var fire_held := mouse_captured and Input.is_action_pressed("fire")
+	var fire_held := mouse_captured and (synthetic_fire if synthetic_only else Input.is_action_pressed("fire"))
 	var human_fire := fire_held if viewmodel.automatic else (fire_held and not _fire_held_last)
 	_fire_held_last = fire_held
 	var wants_fire := human_fire or fire_requested_by_assist

@@ -16,6 +16,10 @@ extends Node
 ##   --behavior=on|off|<file>   the game's own record of how the player plays (mouse, fire button, target visibility, shots),
 ##                         for the « human score » (BehaviorLog, tools/behavior/); default on with --mode=silent, off otherwise.
 ##                         on = <repo>/behavior_logs/<tag>_<date>.aimbeh, --behavior-tag=<name> (default: the mode name)
+##   --cases=<names|all>   scripted bench on the arena with a simulated player moving the view (BenchCases: flick_side, peek_preaim,
+##                         cross_preaim, two_far, two_near, sweep, peek_far, flick_far, mix) ; --case-repeats=<n> (10) ;
+##                         --cases-shooter=trigger[:<delay ms>[:<min visible ms>]] = the bench's own trigger instead of an outside
+##                         program. Every trial is marked in the behaviour record: tools/behavior/case_report.py reads it
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
@@ -86,6 +90,7 @@ signal info_changed
 const TimeCodeScript := preload("res://scripts/timecode.gd")
 const TruthStreamScript := preload("res://scripts/truth_stream.gd")
 const BehaviorLogScript := preload("res://scripts/behavior_log.gd")
+const BenchCasesScript := preload("res://scripts/bench_cases.gd")
 
 var bridge: AimBridge
 var runner: AlgoRunner
@@ -96,6 +101,7 @@ var info_toggles := { "state": true, "meta": true, "hud": true, "timecode": true
 var timecode: Control
 var truth: Node
 var behavior: Node
+var cases: Node
 var _state_blocked := false
 var agent_slug := ""
 var weapon_slug := ""
@@ -151,6 +157,13 @@ func _ready() -> void:
 	bench.progress.connect(func(t: String) -> void: hud.bench_text = t)
 	_setup_info()
 	_setup_behavior()
+	if _args.has("--cases") and behavior != null:
+		var cs: Variant = _args["--cases"]
+		cases = BenchCasesScript.new()
+		cases.name = "BenchCases"
+		add_child(cases)
+		cases.setup(self, String(cs) if typeof(cs) == TYPE_STRING else "all", int(_args.get("--case-repeats", 10)),
+			String(_args.get("--cases-shooter", "")), int(_args.get("--seed", -1)))
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
@@ -311,7 +324,7 @@ func _setup_info() -> void:
 
 ## --behavior=on|off|<file> : the game's own record of how the player plays (BehaviorLog), default on in silent mode.
 func _setup_behavior() -> void:
-	var spec := String(_args.get("--behavior", "on" if mode_name == "silent" or _args.has("--behavior-selftest") else "off"))
+	var spec := String(_args.get("--behavior", "on" if mode_name == "silent" or _args.has("--behavior-selftest") or _args.has("--cases") else "off"))
 	if spec == "off":
 		return
 	var file := spec

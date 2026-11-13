@@ -17,6 +17,8 @@ extends Node
 ##      least one of its test points in line of sight (Enemy.visibility_points: the hitbox capsules, out to their surface)
 ##   S  a shot left the weapon (hit or not, target, zone, kill)
 ##   P  playing (mouse captured) / paused
+##   K  mark of a scripted bench case (BenchCases): case, trial, phase (0 set up, 1 stimulus, 2 end), subject target, a parameter
+## A shot asked by an assist program through the bridge (--mode=remote…) is recorded as a B press + release with device 2.
 ##
 ## File: "AIMBEH1\n", u32 header size, header (JSON, UTF-8), then the records, little-endian, each starting with a type byte
 ## and a u64 time. Reader: tools/behavior/aimbeh.py.
@@ -28,6 +30,7 @@ const REC_FRAME := 3
 const REC_VISIBLE := 4
 const REC_SHOT := 5
 const REC_PLAYING := 6
+const REC_MARK := 7
 const ZONES := { "": 0, "body": 1, "head": 2, "arm": 3 }
 const RAY_MASK := (1 << 2) | (1 << 3) | (1 << 0)
 const WORLD_MASK := 1 << 0
@@ -40,6 +43,9 @@ var selftest := false
 var _buf := StreamPeerBuffer.new()
 var _header_written := false
 var _visible := {}                # target instance id -> bool
+var _visible_since := {}          # target instance id -> clock (µs) when it last became visible
+var on_target: Enemy = null       # what is under the reticle right now (read by the bench cases / the simulated player)
+var on_since_usec := 0
 var _pending_hit := {}            # filled by target_hit, consumed by shot_fired (emitted right after, same call)
 var _records := 0
 var _self_frame := 0
@@ -61,6 +67,8 @@ func setup(p_game: Node, p_path: String, p_selftest: bool, p_selftest_spec := ""
 	player.shot_fired.connect(_on_shot)
 	player.target_hit.connect(_on_hit)
 	player.mouse_capture_changed.connect(_on_capture)
+	if game.bridge:
+		game.bridge.assist_fire.connect(record_assist_fire)
 	DirAccess.make_dir_recursive_absolute(path.get_base_dir())
 	print("BehaviorLog: recording to ", path)
 	_put_playing(player.mouse_captured)
@@ -98,6 +106,8 @@ func _input(event: InputEvent) -> void:
 	var player: Player = game.player
 	if not player.mouse_captured:
 		return
+	if player.synthetic_only and event.device != Player.SYNTHETIC_DEVICE:
+		return                        # simulated player: the real mouse is not part of the game
 	if event is InputEventMouseMotion:
 		_buf.put_u8(REC_MOTION)
 		_buf.put_u64(Time.get_ticks_usec())
@@ -164,6 +174,8 @@ func _process(_delta: float) -> void:
 		var key := e.get_instance_id()
 		if bool(_visible.get(key, false)) != vis:
 			_visible[key] = vis
+			if vis:
+				_visible_since[key] = now
 			_buf.put_u8(REC_VISIBLE)
 			_buf.put_u64(now)
 			_buf.put_16(i)
@@ -186,9 +198,14 @@ func _process(_delta: float) -> void:
 	var zone := 0
 	var query := PhysicsRayQueryParameters3D.create(from, from - cam.global_transform.basis.z * 500.0, RAY_MASK, [player.get_rid()])
 	var hit := space.intersect_ray(query)
+	var under: Enemy = null
 	if hit and hit.collider is Node and hit.collider.is_in_group("hitbox"):
-		on_id = enemies.find(hit.collider.get_meta("enemy"))
+		under = hit.collider.get_meta("enemy")
+		on_id = enemies.find(under)
 		zone = int(ZONES.get(String(hit.collider.get_meta("zone")), 1))
+	if under != on_target:
+		on_target = under
+		on_since_usec = now
 	var assist: Vector2 = player.look_delta_this_frame[Player.LookSource.ASSIST]
 	_buf.put_u8(REC_FRAME)
 	_buf.put_u64(now)
@@ -219,6 +236,36 @@ func _on_shot(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> vo
 	_buf.put_u8(int(_pending_hit.get("zone", 0)))
 	_buf.put_u8(1 if bool(_pending_hit.get("killed", false)) else 0)
 	_pending_hit = {}
+	_records += 1
+
+
+## Is this target visible right now (same test as the V records)? Since when (µs, 0 if it is not)?
+func is_visible(e: Enemy) -> bool:
+	return bool(_visible.get(e.get_instance_id(), false))
+
+
+func visible_since(e: Enemy) -> int:
+	return int(_visible_since.get(e.get_instance_id(), 0)) if is_visible(e) else 0
+
+
+## A shot requested by an assist program (bridge) or by the bench's own trigger: a press + release with device 2.
+func record_assist_fire() -> void:
+	for pressed in [1, 0]:
+		_buf.put_u8(REC_BUTTON)
+		_buf.put_u64(Time.get_ticks_usec())
+		_buf.put_u8(pressed)
+		_buf.put_u8(2)
+		_records += 1
+
+
+func mark(case_id: int, trial: int, phase: int, subject: int, param: float) -> void:
+	_buf.put_u8(REC_MARK)
+	_buf.put_u64(Time.get_ticks_usec())
+	_buf.put_u8(case_id)
+	_buf.put_u16(trial)
+	_buf.put_u8(phase)
+	_buf.put_16(subject)
+	_buf.put_float(param)
 	_records += 1
 
 
