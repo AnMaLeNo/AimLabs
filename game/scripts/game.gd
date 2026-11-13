@@ -20,6 +20,8 @@ extends Node
 ##                         cross_preaim, two_far, two_near, sweep, peek_far, flick_far, mix) ; --case-repeats=<n> (10) ;
 ##                         --cases-shooter=trigger[:<delay ms>[:<min visible ms>]] = the bench's own trigger instead of an outside
 ##                         program. Every trial is marked in the behaviour record: tools/behavior/case_report.py reads it
+##   --max-fps=<n>         limit the rendering rate (default: no limit — ~1000 images/s on the reference PC for a 165 Hz screen)
+##   --crosshair=<style>   reticle: small (default: thin short arms, centre clear) | dot | classic (the former one, ~28 px across) | none
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
@@ -134,6 +136,14 @@ func _ready() -> void:
 	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
 	set_weapon(String(_args.get("--weapon", "operator" if _args.has("--bench-sniper") else "classic")))
 	set_agent(String(_args.get("--agent", "jett")))
+	if _args.has("--max-fps"):
+		Engine.max_fps = maxi(int(_args["--max-fps"]), 0)        # 0 = no limit (the default: ~1000 images/s, the GPU at full load)
+	if _args.has("--crosshair"):
+		var ch := String(_args["--crosshair"])
+		if HUD.CROSSHAIRS.has(ch):
+			hud.crosshair_style = ch
+		else:
+			push_warning("--crosshair: unknown style '%s' (styles: %s)" % [ch, ", ".join(HUD.CROSSHAIRS)])
 	if _args.has("--pattern"):
 		world.set_pattern(String(_args["--pattern"]))
 	if _args.has("--size"):

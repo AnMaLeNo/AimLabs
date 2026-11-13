@@ -108,8 +108,8 @@ func _run() -> void:
 	print("BenchCases: %s, %d trials each%s" % [", ".join(cases), repeats, (" ; own trigger %.0f ms, visible ≥ %.0f ms" % [_shoot_delay_ms, _shoot_min_visible_ms]) if _shooter else ""])
 	for name in cases:
 		var id := CASES.find(name) + 1
-		var far := name.ends_with("_far")
-		var base := name.trim_suffix("_far")
+		var far := name == "peek_far" or name == "flick_far"       # the walls at 30 m (« two_far » is about the OTHER target)
+		var base: String = {"peek_far": "peek_preaim", "flick_far": "flick_side"}.get(name, name)
 		if name == "mix":
 			await _build(NEAR, 1, true)
 			await _case_mix(id)

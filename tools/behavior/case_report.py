@@ -86,10 +86,15 @@ def trials(log):
     return out
 
 
+def label(t):
+    """Nom du cas d'un essai ; le balayage est détaillé par vitesse (le paramètre de l'essai)."""
+    return f"sweep {t['param']:.0f} °/s" if t["case"] == "sweep" else t["case"]
+
+
 def summarize(ts):
     out = {}
-    for name in dict.fromkeys(t["case"] for t in ts):
-        rows = [t for t in ts if t["case"] == name]
+    for name in dict.fromkeys(label(t) for t in ts):
+        rows = [t for t in ts if label(t) == name]
         r = np.array([t["react"] for t in rows if t["react"] is not None])
         tot = np.array([t["tot"] for t in rows if t["tot"] is not None])
         out[name] = dict(n=len(rows), hit=sum(t["hit"] for t in rows), seen=sum(t["vu"] is not None for t in rows),
@@ -127,7 +132,7 @@ def main(argv=None):
                       + ("" if t["dessus"] is not None else " · réticule jamais dessus"))
     cases = list(dict.fromkeys(c for r in res.values() for c in r["summary"]))
     for c in cases:
-        print(f"\n{c} — {WHAT.get(c, '')}")
+        print(f"\n{c} — {WHAT.get(c.split()[0], '')}")
         print(f"  {'configuration':<14} {'essais':>6} {'touchées':>8} {'vu→tir méd.':>12} {'min':>6} {'<100 ms':>8} {'100–150':>8} {'dessus→tir méd.':>16} {'à côté':>7} {'autre cible':>12}")
         for name, r in res.items():
             s = r["summary"].get(c)

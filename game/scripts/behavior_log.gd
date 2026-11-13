@@ -96,6 +96,7 @@ func _header() -> Dictionary:
 		"weapon_automatic": player.viewmodel.automatic, "fire_interval_s": player.viewmodel.fire_interval() if player.viewmodel.weapon_slug != "" else 60.0 / player.rounds_per_minute,
 		"sens_deg_per_px": player.sensitivity_deg_per_px, "viewport": [vp.x, vp.y], "fire_key": game.fire_key_name(),
 		"range": { "pattern": world.pattern, "size": world.pattern_size, "speed": world.pattern_speed, "distance": world.range_distance, "target": world.target_slug },
+		"crosshair": game.hud.crosshair_style,
 		"scenario": { "kinds": world.scenario, "seed": world.scenario_seed, "walls": world.has_occluders },
 		"max_fps": Engine.max_fps, "vsync": DisplayServer.window_get_vsync_mode(), "accumulated_input": Input.use_accumulated_input,
 		"selftest": selftest,

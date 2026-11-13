@@ -133,14 +133,15 @@ def main():
         s0, s150 = CR.summarize(t0), CR.summarize(t150)
         check(len(t0) == 12 and len(t150) == 12 and all(t["vu"] is not None and t["dessus"] is not None and t["hit"] for t in t0 + t150),
               "12 essais marqués par partie ; à chaque essai la cible devient visible, le réticule l'atteint, elle est touchée")
-        check(set(s0) == {"flick_side", "peek_preaim", "two_near", "sweep"}, "les quatre cas demandés sont dans l'enregistrement")
+        check({k.split()[0] for k in s0} == {"flick_side", "peek_preaim", "two_near", "sweep"} and len(s0) == 6, "les quatre cas demandés sont dans l'enregistrement (le balayage détaillé par vitesse)")
         check(s0["peek_preaim"]["lt100"] + s0["peek_preaim"]["lt150"] == 3 and s0["two_near"]["react_med"] < 150,
               f"réticule posé d'avance, sans règle : tirs {s0['peek_preaim']['react_med']:.0f} ms (médiane) après l'apparition — impossible pour un humain")
         check(all(t["react"] >= 150 for t in t150) and 150 <= s150["peek_preaim"]["react_med"] < 175 and s150["peek_preaim"]["tot_med"] > 10,
               f"avec la règle : aucun tir avant 150 ms (médiane {s150['peek_preaim']['react_med']:.0f} ms), au prix de {s150['peek_preaim']['tot_med']:.0f} ms d'attente réticule sur la cible")
         check(300 < s0["flick_side"]["react_med"] < 700 and abs(s0["flick_side"]["react_med"] - s150["flick_side"]["react_med"]) < 40 and s150["flick_side"]["tot_med"] < 10,
               f"coup de souris du joueur simulé : tir {s0['flick_side']['react_med']:.0f} ms après l'apparition (réaction + geste) ; la règle n'y change rien")
-        check(s150["sweep"]["react_med"] > 800 and s150["sweep"]["tot_med"] < 10, "cible visible depuis longtemps, balayée : tir à l'arrivée du réticule, règle ou pas")
+        sw = [v for k, v in s150.items() if k.startswith("sweep")]
+        check(all(v["react_med"] > 800 and v["tot_med"] < 10 for v in sw), "cible visible depuis longtemps, balayée à 60, 150 et 300 °/s : tir à l'arrivée du réticule, règle ou pas")
         b = aimbeh.load(runs[0]).button
         check(len(b) > 0 and bool(np.all(b["key"] == 2)), "les tirs demandés par un programme sont enregistrés comme tels (appui de type 2)")
         mo = aimbeh.load(runs[0]).motion

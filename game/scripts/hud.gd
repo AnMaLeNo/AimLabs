@@ -79,19 +79,35 @@ func on_target_hit(_enemy: Node, zone: String, _damage: int, killed: bool) -> vo
 	_hitmarker_time = 0.12
 
 
+## Reticle style: "small" (default: four thin 4 px arms, no outline, no dot: the very centre stays clear), "dot" (a 1.5 px dot
+## only), "classic" (the former reticle: four 9 px arms + dot with a dark outline, ~28 px across), "none".
+## A big reticle hides a far target — a person at 30 m is ~28 px tall in a 1280×720 window — from whatever looks at the screen,
+## the player's detector included. Measured with the scripted bench through the two-machine pipeline, targets at 30 m:
+## classic 7/8 and 6/8 hit, shot 203 ms after the reticle is on the target; small 8/8 and 8/8, 113 ms.
+const CROSSHAIRS: Array[String] = ["small", "dot", "classic", "none"]
+var crosshair_style := "small"
+
+
 func _draw_crosshair() -> void:
 	var c := crosshair.size * 0.5
-	var gap := 5.0
-	var length := 9.0
-	var thickness := 2.0
 	var col := Color(0.2, 1.0, 0.4)
 	var outline := Color(0, 0, 0, 0.8)
-	for dir in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
-		var a: Vector2 = c + dir * gap
-		var b: Vector2 = c + dir * (gap + length)
-		crosshair.draw_line(a, b, outline, thickness + 2.0)
-		crosshair.draw_line(a, b, col, thickness)
-	crosshair.draw_circle(c, 1.5, col)
+	match crosshair_style:
+		"classic":
+			var gap := 5.0
+			var length := 9.0
+			var thickness := 2.0
+			for dir in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
+				var a: Vector2 = c + dir * gap
+				var b: Vector2 = c + dir * (gap + length)
+				crosshair.draw_line(a, b, outline, thickness + 2.0)
+				crosshair.draw_line(a, b, col, thickness)
+			crosshair.draw_circle(c, 1.5, col)
+		"small":
+			for dir in [Vector2.RIGHT, Vector2.LEFT, Vector2.UP, Vector2.DOWN]:
+				crosshair.draw_line(c + dir * 4.0, c + dir * 8.0, Color(col, 0.85), 1.0)
+		"dot":
+			crosshair.draw_circle(c, 1.5, col)
 	if _hitmarker_time > 0.0:
 		var alpha := clampf(_hitmarker_time / 0.12, 0.0, 1.0)
 		var hc := Color(_hitmarker_color, alpha)
