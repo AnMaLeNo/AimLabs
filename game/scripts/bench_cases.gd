@@ -22,8 +22,19 @@ extends Node
 ##   sweep         a target stands in the open for a while; the player sweeps the reticle across it at 60, 150, 300, 600 °/s
 ##   peek_far, flick_far   the same as peek_preaim / flick_side with the walls at 30 m instead of 12
 ##   mix           60 s of the random arena (ScenarioDirector) with the player playing by itself
+##   sweep_acc     like sweep, but the hand speeds up or slows down over the last 10° before the target (constant angular
+##                 acceleration): 200→200, 100→300, 300→100, 200→400, 400→200, 150→600, 600→150, 300→300 °/s, i.e. 0, ±4000,
+##                 ±6000 and ±16875 °/s². What a shot scheduled from a measured SPEED does when the speed is changing.
+##   flick_pass    a human-like flick (minimum jerk, 30° or 60°) that goes THROUGH a target standing in the open instead of
+##                 stopping on it: the target is crossed at 30 % of the flick (the hand is still accelerating), 50 % (top
+##                 speed) or 70 % (braking)
+## « all » = the first eight (as before); « accel » = sweep_acc + flick_pass.
 
-const CASES: Array[String] = ["flick_side", "peek_preaim", "cross_preaim", "two_far", "two_near", "sweep", "peek_far", "flick_far", "mix"]
+const CASES: Array[String] = ["flick_side", "peek_preaim", "cross_preaim", "two_far", "two_near", "sweep", "peek_far", "flick_far", "mix", "sweep_acc", "flick_pass"]
+const NOT_IN_ALL: Array[String] = ["mix", "sweep_acc", "flick_pass"]
+const ACC: Array = [[200.0, 200.0], [100.0, 300.0], [300.0, 100.0], [200.0, 400.0], [400.0, 200.0], [150.0, 600.0], [600.0, 150.0], [300.0, 300.0]]   # speed before the ramp, speed on the target (°/s)
+const ACC_RAMP := 10.0        # degrees before the target over which the speed changes
+const PASS: Array = [[30.0, 0.3], [30.0, 0.5], [30.0, 0.7], [60.0, 0.3], [60.0, 0.5], [60.0, 0.7]]      # amplitude of the flick (°), part of its duration at which it crosses the target
 const NEAR := 12.0
 const FAR := 30.0
 const AutopilotScript := preload("res://scripts/autopilot.gd")
@@ -57,8 +68,11 @@ func setup(p_game: Node, spec: String, p_repeats: int, shooter_spec: String, p_s
 	for name in spec.split(",", false):
 		var n := String(name).strip_edges()
 		if n == "all":
-			cases.assign(CASES.filter(func(c: String) -> bool: return c != "mix"))
+			cases.assign(CASES.filter(func(c: String) -> bool: return not NOT_IN_ALL.has(c)))
 			break
+		if n == "accel":
+			cases.append_array(["sweep_acc", "flick_pass"])
+			continue
 		if CASES.has(n):
 			cases.append(n)
 		else:
@@ -133,6 +147,10 @@ func _run() -> void:
 					await _case_peek(id, r, "near")
 				"sweep":
 					await _case_sweep(id, r)
+				"sweep_acc":
+					await _case_sweep_acc(id, r)
+				"flick_pass":
+					await _case_flick_pass(id, r)
 			trials_done += 1
 	pilot.off()
 	game.behavior.flush()
@@ -294,6 +312,59 @@ func _case_sweep(id: int, trial: int) -> void:
 		await get_tree().process_frame
 	await _wait(0.3)
 	_mark(id, trial, 2, 0, speed)
+	s.set_shown(false)
+	await _wait(0.2)
+
+
+## The reticle sweeps across a target that has been visible for a while, and its speed changes over the last ACC_RAMP degrees
+## before the target (constant acceleration). param = speed before × 1000 + speed on the target.
+func _case_sweep_acc(id: int, trial: int) -> void:
+	var s: Enemy = world.targets[0]
+	var z := _open_z()
+	_place(s, _rng.randf_range(-2.0, 2.0), z, true)
+	await get_tree().process_frame
+	var a: Vector2 = pilot.angles_to(s.body_position())
+	var dirn := 1.0 if _rng.randf() < 0.5 else -1.0
+	var p: Array = ACC[trial % ACC.size()]
+	var param: float = p[0] * 1000.0 + p[1]
+	pilot.off()
+	pilot.snap_angles(a.x - dirn * 25.0, a.y)
+	_mark(id, trial, 0, 0, param)
+	await _wait(_rng.randf_range(1.0, 1.5))
+	_mark(id, trial, 1, 0, param)
+	pilot.sweep_ramp(a.x + dirn * 25.0, a.y, a.x, p[0], p[1], ACC_RAMP)
+	while pilot.busy():
+		await get_tree().process_frame
+	await _wait(0.3)
+	_mark(id, trial, 2, 0, param)
+	s.set_shown(false)
+	await _wait(0.2)
+
+
+## A minimum-jerk flick that crosses the target at a given part of its duration and ends beyond it. param = amplitude + part.
+func _case_flick_pass(id: int, trial: int) -> void:
+	var s: Enemy = world.targets[0]
+	var z := _open_z()
+	_place(s, _rng.randf_range(-2.0, 2.0), z, true)
+	await get_tree().process_frame
+	var a: Vector2 = pilot.angles_to(s.body_position())
+	var dirn := 1.0 if _rng.randf() < 0.5 else -1.0
+	var p: Array = PASS[trial % PASS.size()]
+	var amp: float = p[0]
+	var f: float = p[1]
+	var sf := f * f * f * (10.0 - 15.0 * f + 6.0 * f * f)        # part of the PATH done when that part of the TIME has passed
+	var from_yaw := a.x - dirn * amp * sf
+	var param: float = amp + f
+	pilot.off()
+	pilot.snap_angles(from_yaw, a.y)
+	_mark(id, trial, 0, 0, param)
+	await _wait(_rng.randf_range(1.0, 1.5))
+	_mark(id, trial, 1, 0, param)
+	pilot.flick_angles(from_yaw + dirn * amp, a.y, 0.10 + 0.0045 * amp)
+	while pilot.busy():
+		await get_tree().process_frame
+	await _wait(0.3)
+	_mark(id, trial, 2, 0, param)
 	s.set_shown(false)
 	await _wait(0.2)
 

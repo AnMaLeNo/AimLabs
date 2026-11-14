@@ -20,7 +20,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from aimbeh import load  # noqa: E402
 
-CASES = ["flick_side", "peek_preaim", "cross_preaim", "two_far", "two_near", "sweep", "peek_far", "flick_far", "mix"]
+CASES = ["flick_side", "peek_preaim", "cross_preaim", "two_far", "two_near", "sweep", "peek_far", "flick_far", "mix", "sweep_acc", "flick_pass"]
 WHAT = {
     "flick_side": "cible qui apparaît sur le côté, coup de souris humain",
     "peek_preaim": "réticule posé d'avance, la cible sort du mur dessous",
@@ -31,7 +31,10 @@ WHAT = {
     "peek_far": "peek_preaim à 30 m",
     "flick_far": "flick_side à 30 m",
     "mix": "arène aléatoire, joueur simulé seul",
+    "sweep_acc": "balayage dont la vitesse change sur les 10 derniers degrés avant la cible (vitesse avant → vitesse sur la cible)",
+    "flick_pass": "coup de souris humain qui TRAVERSE la cible : à 30 % de sa durée (il accélère), 50 % (vitesse maximale), 70 % (il freine)",
 }
+PASSING = ("sweep", "sweep_acc", "flick_pass")       # cas où le réticule traverse la cible : on y mesure l'écart du tir à son passage sur l'axe
 
 
 def trials(log):
@@ -82,13 +85,43 @@ def trials(log):
             if d["dessus"] is not None:
                 d["tot"] = d["tir"] - d["dessus"]
         d["visible_at_stim"] = on_at_stim
+        # Réticule qui TRAVERSE la cible : instant où il passe sur son axe vertical (l'écart horizontal change de signe), vitesse angulaire à cet
+        # instant, et écart du tir le plus proche à ce passage (ms ; positif = tir en retard). `half_ms` : temps que met le réticule à parcourir la
+        # demi-largeur de la cible à cette vitesse — un tir écarté de plus que cela est à côté.
+        d["cross"] = d["err"] = d["cross_speed"] = d["half_ms"] = None
+        if d["case"] in PASSING and i2 - i1 > 3:
+            seg = fr[i1:i2]
+            ok = np.nonzero(seg["near_id"] == subj)[0]
+            ox = seg["off_x"].astype(np.float64)
+            for a_, b_ in zip(ok[:-1], ok[1:]):
+                if b_ == a_ + 1 and ox[a_] * ox[b_] <= 0.0 and ox[a_] != ox[b_]:
+                    u = ox[a_] / (ox[a_] - ox[b_])
+                    tc = ft[i1 + a_] + u * (ft[i1 + b_] - ft[i1 + a_])
+                    lo, hi = max(i1 + a_ - 3, 0), min(i1 + b_ + 3, len(fr) - 1)
+                    dyaw = (float(fr["yaw"][hi]) - float(fr["yaw"][lo]) + 180.0) % 360.0 - 180.0
+                    spd = abs(dyaw) / max((ft[hi] - ft[lo]) / 1e3, 1e-6)
+                    d["cross"], d["cross_speed"] = float(tc), float(spd)
+                    d["half_ms"] = float(seg["half_w"][a_]) / max(spd, 1e-6) * 1e3
+                    near = st[m]
+                    if len(near):
+                        d["err"] = float(near[np.argmin(np.abs(near - tc))] - tc)
+                    break
         out.append(d)
     return out
 
 
 def label(t):
-    """Nom du cas d'un essai ; le balayage est détaillé par vitesse (le paramètre de l'essai)."""
-    return f"sweep {t['param']:.0f} °/s" if t["case"] == "sweep" else t["case"]
+    """Nom du cas d'un essai ; les cas à paramètre sont détaillés (le paramètre de l'essai)."""
+    if t["case"] == "sweep":
+        return f"sweep {t['param']:.0f} °/s"
+    if t["case"] == "sweep_acc":
+        v0, v1 = int(round(t["param"])) // 1000, int(round(t["param"])) % 1000
+        acc = (v1 * v1 - v0 * v0) / 20.0
+        return f"sweep_acc {v0}→{v1} °/s ({acc:+.0f} °/s²)"
+    if t["case"] == "flick_pass":
+        amp = int(t["param"])
+        return f"flick_pass {amp}° à {round((t['param'] - amp) * 100):.0f} %"
+    return t["case"]
 
 
 def summarize(ts):
@@ -103,11 +136,39 @@ def summarize(ts):
                          lt100=int((r < 100).sum()), lt150=int(((r >= 100) & (r < 150)).sum()),
                          tot_med=float(np.median(tot)) if len(tot) else None,
                          misses=sum(t["misses"] for t in rows), wrong=sum(t["wrong"] for t in rows), shots=sum(t["shots"] for t in rows))
+        err = np.array([t["err"] for t in rows if t.get("err") is not None])
+        half = np.array([t["half_ms"] for t in rows if t.get("half_ms") is not None])
+        spd = np.array([t["cross_speed"] for t in rows if t.get("cross_speed") is not None])
+        out[name].update(crossed=sum(t.get("cross") is not None for t in rows), fired=int(len(err)),
+                         err_med=float(np.median(err)) if len(err) else None, err_mean=float(err.mean()) if len(err) else None,
+                         err_sd=float(err.std()) if len(err) else None, err_p90=float(np.percentile(np.abs(err), 90)) if len(err) else None,
+                         half_ms=float(np.median(half)) if len(half) else None, speed=float(np.median(spd)) if len(spd) else None)
     return out
 
 
 def fmt(v, unit=""):
     return "—" if v is None else f"{v:.0f}{unit}"
+
+
+def fmt1(v, unit=""):
+    return "—" if v is None else f"{v:+.1f}{unit}"
+
+
+def passing_table(res, out=print):
+    """Cas où le réticule TRAVERSE la cible : pour chaque configuration, taux de touches et écart du tir au passage du réticule sur l'axe de la cible.
+    `res` : {nom: {"summary": …}} (ou {"summary", "trials"}). Un tir écarté de plus que la demi-largeur (en temps) est à côté."""
+    cases = [c for c in dict.fromkeys(c for r in res.values() for c in r["summary"]) if c.split()[0] in PASSING]
+    if not cases:
+        return
+    out("\nRéticule qui traverse la cible : touches et écart du tir à son passage sur l'axe de la cible (ms ; + = tir en retard)")
+    out(f"  {'cas':<38} {'configuration':<16} {'essais':>6} {'touchées':>9} {'tirs':>5} {'à côté':>7} {'vitesse':>9} {'½ largeur':>10} {'écart méd.':>11} {'moyen':>7} {'écart-type':>11} {'|écart| p90':>12}")
+    for c in cases:
+        for name, r in res.items():
+            x = r["summary"].get(c)
+            if x:
+                out(f"  {c:<38} {name:<16} {x['n']:>6} {x['hit']:>5} ({100 * x['hit'] / max(x['n'], 1):3.0f}%) {x['shots']:>5} {x['misses']:>7} {fmt(x.get('speed'), ' °/s'):>9} "
+                    f"{('—' if x.get('half_ms') is None else format(x['half_ms'], '.1f') + ' ms'):>10} {fmt1(x.get('err_med'), ' ms'):>11} {fmt1(x.get('err_mean')):>7} "
+                    f"{('—' if x.get('err_sd') is None else format(x['err_sd'], '.1f') + ' ms'):>11} {('—' if x.get('err_p90') is None else format(x['err_p90'], '.1f') + ' ms'):>12}")
 
 
 def main(argv=None):
@@ -138,6 +199,7 @@ def main(argv=None):
             s = r["summary"].get(c)
             if s:
                 print(f"  {name:<14} {s['n']:>6} {s['hit']:>8} {fmt(s['react_med'], ' ms'):>12} {fmt(s['react_min']):>6} {s['lt100']:>8} {s['lt150']:>8} {fmt(s['tot_med'], ' ms'):>16} {s['misses']:>7} {s['wrong']:>12}")
+    passing_table(res)
     if a.json:
         with open(a.json, "w", encoding="utf-8") as f:
             json.dump(res, f, indent=1)
