@@ -37,6 +37,25 @@ WHAT = {
 PASSING = ("sweep", "sweep_acc", "flick_pass")       # cas où le réticule traverse la cible : on y mesure l'écart du tir à son passage sur l'axe
 
 
+def shot_times_ms(log):
+    """Instant de chaque tir (ms, horloge du jeu). Les journaux écrits AVANT le 2026-11-16 datent un tir MANQUÉ jusqu'à 9 ms trop tard : le jeu horodatait
+    le tir après avoir créé l'impact sur le décor, ce qui lui prenait 8 à 16 ms quand plus aucun impact n'existait (ils sont supprimés après 8 s).
+    Mesuré sur 5 passes du banc : 0 tir touché sur 590 daté en retard, 60 tirs manqués sur 147. Quand le tir répond à une demande d'un programme
+    (bouton, périphérique 2) reçue 2 à 20 ms plus tôt, on le date de cette demande + 0,3 ms (l'écart normal, celui des tirs touchés). Sans effet sur
+    les journaux récents (écart de 0,2 à 0,3 ms) ni sur les tirs d'un joueur (pas de demande)."""
+    st = log.shot["t"].astype(np.float64) / 1e3
+    b = log.button
+    req = b["t"][(b["pressed"] == 1) & (b["key"] == 2)].astype(np.float64) / 1e3
+    if not len(req) or not len(st):
+        return st
+    q = np.clip(np.searchsorted(req, st + 1e-4) - 1, 0, len(req) - 1)
+    lag = st - req[q]
+    fix = (lag > 2.0) & (lag < 20.0)
+    st = st.copy()
+    st[fix] = req[q][fix] + 0.3
+    return st
+
+
 def trials(log):
     """Un dict par essai : cas, numéro, paramètre, sujet, et les instants (ms) mesurés par le jeu."""
     mk = log.mark
@@ -46,7 +65,7 @@ def trials(log):
     fr = log.frame
     ft = fr["t"].astype(np.float64) / 1e3
     shots = log.shot
-    st = shots["t"].astype(np.float64) / 1e3
+    st = shot_times_ms(log)
     vis = log.visible
     keys = sorted({(int(m["case"]), int(m["trial"])) for m in mk}, key=lambda k: min(int(m["t"]) for m in mk if (int(m["case"]), int(m["trial"])) == k))
     for case, trial in keys:

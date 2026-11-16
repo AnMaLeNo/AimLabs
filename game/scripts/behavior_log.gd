@@ -231,7 +231,9 @@ func _on_hit(enemy: Node, zone: String, _damage: int, killed: bool) -> void:
 
 func _on_shot(_origin: Vector3, _hit_point: Vector3, _hit_something: bool) -> void:
 	_buf.put_u8(REC_SHOT)
-	_buf.put_u64(Time.get_ticks_usec())
+	# the instant of the shot itself, not of this signal: until 2026-11-16 a missed shot was dated up to 8 ms late (the impact
+	# mark was built before the signal), which read as « the shot left 8 ms after it was asked »
+	_buf.put_u64(game.player.last_fire_usec)
 	_buf.put_u8(0 if _pending_hit.is_empty() else 1)
 	_buf.put_16(int(_pending_hit.get("id", -1)))
 	_buf.put_u8(int(_pending_hit.get("zone", 0)))
