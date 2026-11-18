@@ -111,20 +111,47 @@ def polygon_of(mask: np.ndarray) -> Optional[np.ndarray]:
     return np.concatenate(merge_multi_segment(segs), axis=0)
 
 
-def draw_reticle(img: np.ndarray, size: int) -> np.ndarray:
-    """Réticule de hud.gd (espace 4× puis réduit) : 4 traits vert, contour noir 80 %, point central."""
-    k = 4
-    layer = np.zeros((size * k, size * k, 4), np.uint8)
-    c = size * k // 2
-    green, black = (102, 255, 51, 255), (0, 0, 0, 204)  # BGRA ; vert = Color(0.2, 1.0, 0.4), contour noir 80 %
-    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-    for col, width in [(black, 4 * k), (green, 2 * k)]:  # contour (épaisseur 2+2) puis trait (2)
-        for dx, dy in dirs:
-            cv2.line(layer, (c + dx * 5 * k, c + dy * 5 * k), (c + dx * 14 * k, c + dy * 14 * k), col, width, cv2.LINE_8)
-    cv2.circle(layer, (c, c), int(1.5 * k), green, -1)
-    layer = cv2.resize(layer, (size, size), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+_RETICLES = {}
+
+
+def draw_reticle(img: np.ndarray, size: int, style: str = "classic") -> np.ndarray:
+    """Réticule de hud.gd au centre (dessiné en 4× puis réduit). « classic » : l'ancien réticule du jeu, 4 traits verts de 5 à 14 px avec contour noir 80 % et
+    point central (celui des jeux de données v1 / v2) ; « small » : celui que le jeu dessine aujourd'hui par défaut, 4 traits fins de 4 à 8 px, 1 px de large,
+    opacité 0,85, centre libre ; « dot » : un point de 1,5 px ; « none » : rien."""
+    if style == "none":
+        return img
+    if (style, size) not in _RETICLES:
+        k = 4
+        layer = np.zeros((size * k, size * k, 4), np.uint8)
+        c = size * k // 2
+        green, black = (102, 255, 51, 255), (0, 0, 0, 204)  # BGRA ; vert = Color(0.2, 1.0, 0.4), contour noir 80 %
+        dirs = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        if style == "classic":
+            for col, width in [(black, 4 * k), (green, 2 * k)]:  # contour (épaisseur 2+2) puis trait (2)
+                for dx, dy in dirs:
+                    cv2.line(layer, (c + dx * 5 * k, c + dy * 5 * k), (c + dx * 14 * k, c + dy * 14 * k), col, width, cv2.LINE_8)
+            cv2.circle(layer, (c, c), int(1.5 * k), green, -1)
+        elif style == "dot":
+            cv2.circle(layer, (c, c), int(1.5 * k), green, -1)
+        else:
+            for dx, dy in dirs:
+                cv2.line(layer, (c + dx * 4 * k, c + dy * 4 * k), (c + dx * 8 * k, c + dy * 8 * k), green[:3] + (int(255 * 0.85),), k, cv2.LINE_8)
+        _RETICLES[(style, size)] = cv2.resize(layer, (size, size), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    layer = _RETICLES[(style, size)]
     a = layer[..., 3:4]
     return (img * (1 - a) + layer[..., :3] * a * 255.0).astype(np.uint8)  # layer BGR, img BGR
+
+
+def pick_reticle(rng: np.random.Generator, mode: str) -> str:
+    """Le réticule d'une image. « classic » : l'ancien dans 90 % des images (v1 / v2). « mix » : le réticule actuel du jeu dans 55 % des images, l'ancien 20 %,
+    le point 10 %, aucun 15 % — le modèle ne doit pas dépendre du réticule choisi dans le jeu (--crosshair).
+    « none » : JAMAIS de réticule (jeu v3 : le réticule change d'une version à l'autre du jeu, et il cache la tête d'une cible lointaine)."""
+    r = rng.random()
+    if mode == "none":
+        return "none"
+    if mode == "classic":
+        return "classic" if r < 0.90 else "none"
+    return "small" if r < 0.55 else ("classic" if r < 0.75 else ("dot" if r < 0.85 else "none"))
 
 
 def degrade(img: np.ndarray, rng: np.random.Generator, p_scale: float) -> np.ndarray:
@@ -155,7 +182,7 @@ def contact_shadow(bg: np.ndarray, mask: np.ndarray, rng: np.random.Generator) -
 
 
 def build(job: Tuple[dict, str, str, str, int]) -> Optional[dict]:
-    sample, renders, out, bg_dir, size = job
+    sample, renders, out, bg_dir, size, reticle = job
     sid, split = sample["id"], sample["meta"]["split"]
     rng = np.random.default_rng(zlib.crc32(sid.encode()))
     agents = sample["agents"]
@@ -182,8 +209,7 @@ def build(job: Tuple[dict, str, str, str, int]) -> Optional[dict]:
         img = (rgb[..., ::-1] * 255.0 + 0.5).astype(np.uint8)
         p_scale = 1.0
     img = degrade(img, rng, p_scale)
-    if rng.random() < 0.90:
-        img = draw_reticle(img, size)
+    img = draw_reticle(img, size, pick_reticle(rng, reticle))
     lines, boxes = [], []
     for m in vis:
         area = int(m.sum())
@@ -215,14 +241,16 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--plan", required=True)
     ap.add_argument("--renders", required=True)
-    ap.add_argument("--backgrounds", required=True)
+    ap.add_argument("--backgrounds", default="", help="backgrounds.json (inutile pour un plan sans photo de fond, ex. head_plan.py)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--reticle", default="classic", choices=["classic", "mix", "none"], help="réticule dessiné : l'ancien dans 90 %% des images (v1 / v2), ou un mélange "
+                    "où domine le réticule actuel du jeu (voir pick_reticle)")
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--exclude", nargs="*", default=["harbor"], help="personnages écartés (aucun échantillon où ils apparaissent, même en figurant)")
     ap.add_argument("--names-from", default=os.path.join(os.path.dirname(__file__), "..", "..", "algos", "yolo11n-seg.pt"))
     a = ap.parse_args()
     plan = json.load(open(a.plan))
-    bg_dir = json.load(open(a.backgrounds))["images_dir"]
+    bg_dir = json.load(open(a.backgrounds))["images_dir"] if a.backgrounds else ""
     size = plan["size"]
     def rendered(s: dict) -> bool:
         need = f"{a.renders}/{s['id']}_c.png" if s["mode"] == "game" else (f"{a.renders}/{s['id']}_f.png" if s["agents"] else None)
@@ -230,7 +258,7 @@ def main() -> None:
 
     done = [s for s in plan["samples"] if rendered(s) and not any(x["slug"] in a.exclude for x in s["agents"])]
     print(f"{len(done)}/{len(plan['samples'])} échantillons rendus")
-    jobs = [(s, a.renders, a.out, bg_dir, size) for s in done]
+    jobs = [(s, a.renders, a.out, bg_dir, size, a.reticle) for s in done]
     metas = []
     with Pool(a.workers) as p:
         for i, m in enumerate(p.imap_unordered(build, jobs, chunksize=16)):
