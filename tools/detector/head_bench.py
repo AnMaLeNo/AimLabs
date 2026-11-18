@@ -86,7 +86,7 @@ def load_images(a, cases: List[dict]) -> np.ndarray:
     vs = [v for v in VARIANTS if any(c["variant"] == v for c in cases)]
     # (un fichier par jeu de variantes : `--variants libre` réécrivait sinon, en 4 minutes, le fichier des trois variantes, et inversement)
     cache = (os.path.splitext(a.truth)[0] + f".{a.interp}.{a.reticle}" + ("" if vs == VARIANTS else "." + "-".join(vs))
-             + ("" if N == 256 else f".n{N}") + ("" if a.zoom == 1.0 else f".z{a.zoom:g}") + ".npy")
+             + ("" if N == 256 else f".n{N}") + ("" if a.zoom == 1.0 else f".z{a.zoom:g}") + (f".j{a.jpeg}" if a.jpeg else "") + ".npy")
     key = [c["id"] + c["variant"] for c in cases]
     if os.path.exists(cache) and os.path.exists(cache + ".json") and json.load(open(cache + ".json")) == key and not a.rebuild:
         return np.load(cache, mmap_mode="r")
@@ -101,7 +101,10 @@ def load_images(a, cases: List[dict]) -> np.ndarray:
             side = int(round(c["size"] / a.zoom))
             o = (c["size"] - side) // 2
             img = img[o:o + side, o:o + side]
-        out[i] = img if img.shape[0] == N else cv2.resize(img, (N, N), interpolation=interp)
+        img = img if img.shape[0] == N else cv2.resize(img, (N, N), interpolation=interp)
+        if a.jpeg:                                           # la chaîne deux machines envoie l'image en JPEG (agent_a.py --jpeg 60, couleur sous-échantillonnée 4:2:0)
+            img = cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, a.jpeg])[1], cv2.IMREAD_COLOR)
+        out[i] = img
     out.flush()
     json.dump(key, open(cache + ".json", "w"))
     return out
@@ -189,6 +192,7 @@ class Acc:
         self.n = self.vis = self.found = self.aim = 0
         self.err: List[float] = []
         self.err_r: List[float] = []
+        self.dy: List[float] = []                            # milieu annoncé − vrai milieu, en hauteurs de tête (positif : annoncé trop bas)
         self.pos = self.pos_yes = self.neg = self.neg_yes = self.neg_yes_body = 0
 
     def row(self) -> Dict:
@@ -196,7 +200,8 @@ class Acc:
         e = np.array(self.err) if self.err else np.array([np.nan])
         yes = self.pos_yes + self.neg_yes
         return {"n": self.n, "têtes": self.vis, "trouvée": f(self.found, self.vis), "err_med": float(np.median(e)), "err_p90": float(np.percentile(e, 90)),
-                "err_rayons": float(np.median(self.err_r)) if self.err_r else float("nan"), "viser": f(self.aim, self.vis),
+                "err_rayons": float(np.median(self.err_r)) if self.err_r else float("nan"), "biais_y": float(np.median(self.dy)) if self.dy else float("nan"),
+                "viser": f(self.aim, self.vis),
                 "n_sur_tête": self.pos, "tire": f(self.pos_yes, self.pos), "n_hors_tête": self.neg, "à_tort": f(self.neg_yes, self.neg),
                 "à_tort_corps": f(self.neg_yes_body, self.neg), "juste": f(self.pos_yes, yes)}
 
@@ -224,6 +229,7 @@ def judge(case: dict, truth: dict, dets: list, conf: float, accs: List[Acc], zoo
                 acc.found += 1
                 acc.err.append(err)
                 acc.err_r.append(err / (hi["r_px"] * k))
+                acc.dy.append((c[1] - gy) / max(1e-6, (hi["y1"] - hi["y0"]) * k))
                 acc.aim += int(hit)
     says = any(d[3](N / 2.0, N / 2.0) for d in dets)
     out = {"vis": hi is not None and hi["in_frac"] >= 0.5, "found": bool(hi is not None and hi["in_frac"] >= 0.5 and err is not None),
@@ -254,6 +260,8 @@ def main() -> None:
     ap.add_argument("--interp", default="nearest", choices=["nearest", "bilinear", "area"])
     ap.add_argument("--reticle", default="small", choices=["small", "classic", "dot", "none"],
                     help="réticule dessiné au centre (défaut : celui du jeu aujourd'hui ; « classic » : l'ancien, gros, qui cache une tête lointaine)")
+    ap.add_argument("--jpeg", type=int, default=0, help="qualité JPEG appliquée à l'image donnée au réseau (60 : ce qu'envoie la chaîne deux machines ; 0 : pixels intacts). "
+                    "Constaté le 2026-11-18 : sur une tête de 4 px le JPEG déplace la zone annoncée d'un demi-pixel vers le bas, et le banc sans JPEG ne le voyait pas")
     ap.add_argument("--net", type=int, default=256, help="côté de l'image donnée au réseau (256 : la chaîne d'aujourd'hui, qui réduit le carré de 480 px de l'écran)")
     ap.add_argument("--zoom", type=float, default=1.0, help="ne donner au réseau que le carré central de côté 480 / zoom (1,875 avec --net 256 : pixels de l'écran, sans réduction)")
     ap.add_argument("--batch", type=int, default=128)
@@ -298,13 +306,13 @@ def main() -> None:
         if a.cases_out:
             json.dump(per_case, open(a.cases_out.replace("{name}", name), "w", encoding="utf-8"))
         print(f"\n=== {name}  ({kind}, {os.path.basename(path)}{', ' + ', '.join(parts[2:]) if parts[2:] else ''})  — {time.time() - t1:.1f} s")
-        print(f"{'':28s}{'têtes':>6s} {'trouvée':>8s} {'erreur px (méd / p90)':>22s} {'viser':>7s} │ {'sur tête':>8s} {'tire':>7s} {'hors tête':>9s} {'à tort':>7s} {'juste':>7s}")
+        print(f"{'':28s}{'têtes':>6s} {'trouvée':>8s} {'erreur px (méd / p90)':>22s} {'biais y':>8s} {'viser':>7s} │ {'sur tête':>8s} {'tire':>7s} {'hors tête':>9s} {'à tort':>7s} {'juste':>7s}")
         for v in a.variants:
             for d in ["toutes distances"] + [n for _, _, n in DIST_BINS]:
                 r = rows.get(f"{v} · {d}")
                 if r is None:
                     continue
-                print(f"{(v if d == 'toutes distances' else '') :8s}{d:20s}{r['têtes']:6d} {pct(r['trouvée']):>8s} {r['err_med']:10.2f} / {r['err_p90']:5.2f}    {pct(r['viser']):>7s} │ "
+                print(f"{(v if d == 'toutes distances' else '') :8s}{d:20s}{r['têtes']:6d} {pct(r['trouvée']):>8s} {r['err_med']:10.2f} / {r['err_p90']:5.2f}    {100 * r['biais_y']:+7.1f}% {pct(r['viser']):>7s} │ "
                       f"{r['n_sur_tête']:8d} {pct(r['tire']):>7s} {r['n_hors_tête']:9d} {pct(r['à_tort']):>7s} {pct(r['juste']):>7s}")
     if a.out:
         json.dump(results, open(a.out, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
