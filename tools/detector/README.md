@@ -56,6 +56,146 @@ pas du nombre d'exemples.
   images sans personnage et l'accord des deux backends. Mesuré pour v2 (800 images de test) : Core ML = PyTorch sur 100 % des décisions
   et des nombres de détections, écart de boîte max 1,1 px.
 
+## Trouver la tête : vérité du moteur, banc rapide, modèle pose (2026-11-17)
+
+Le tir « uniquement sur la tête » de la chaîne deux machines déduit la tête d'une silhouette (le haut de la boîte). Pour faire mieux il fallait deux choses :
+savoir, pour n'importe quelle image, **quels pixels sont un tir à la tête d'après le jeu**, et pouvoir **juger une idée en quelques secondes** au lieu de faire
+jouer le stand de tir sur la chaîne complète (5 à 10 minutes par réglage).
+
+```
+game/tools/gen_dataset.gd --truth=<f.jsonl> [--no-render] [--probe=N]   par image : caméra, capsules de tir de chaque personnage, os du squelette (≈ 1 500 images/s sans rendu)
+head_truth.py     le rayon → capsule du jeu refait en numpy : zone sous chaque pixel ; `check` compare aux vrais rayons du moteur (--probe)
+head_plan.py      2 700 situations de tir à la tête (tous les personnages, 3 à 60 m, réticule posé autour de la tête) : le plan du banc, ou des images d'entraînement
+head_bench.py     LE BANC RAPIDE : chaque candidat jugé hors ligne sur ces images (personnage entier, derrière un muret, derrière un angle de mur)
+pose_labels.py    étiquettes YOLO-pose (20 points) pour un jeu de données déjà rendu ; murs dessinés devant un quart des personnages
+train_pose.py     fine-tuning d'un yolo11*-pose (tolérances par point données à la perte)
+kpt_sheet.py      planches de contrôle : les points posés sur chaque personnage (face, côté, dos), à vérifier à l'œil
+head_parse_check.py   second avis : un modèle public de découpage du visage dit où est la tête dessinée, comparé à la zone du jeu
+```
+
+```sh
+# vérité des images déjà rendues (rien n'est re-rendu) et contrôle du calcul contre le moteur
+godot --headless --path game res://tools/gen_dataset.tscn -- --plan=<data>/v2/plan.json --out=<tmp> --truth=<data>/head/v2_truth.jsonl --no-render
+godot --headless --path game res://tools/gen_dataset.tscn -- --plan=<data>/v2/plan.json --out=<tmp> --truth=<probe.jsonl> --no-render --probe=60 --count=400
+python tools/detector/head_truth.py check --truth <probe.jsonl>                     # 18 812 rayons du moteur : 0,14 % de désaccords (bords des capsules)
+# le banc : rendu une fois (2 min), puis 20 à 60 s par candidat
+python tools/detector/head_plan.py --out <data>/head/bench_plan.json
+godot --path game --resolution 640x360 res://tools/gen_dataset.tscn -- --plan=<bench_plan.json> --out=<data>/head/bench_renders --truth=<data>/head/bench_truth.jsonl
+python tools/detector/head_bench.py --renders <bench_renders> --truth <bench_truth.jsonl> --plan <bench_plan.json> \
+    --models seg8=seg,algos/yolo11n-seg-ft2.pt pose=jeu,<runs>/pose_n4/weights/best.pt,shrink=0.8
+# jeu de données sans réticule + situations de tir à la tête, étiquettes pose, entraînement
+python tools/detector/compose.py --plan <data>/v2/plan.json --renders <data>/v2/renders --backgrounds <backgrounds_hard.json> --out <data>/v3/ds480 --reticle none
+python tools/detector/head_plan.py --out <train_plan.json> --per-agent 200 --seed 11 --split train --prefix k --env-frac 0.5 --spread 3     # puis rendu + compose, images ajoutées à v3/ds480
+python tools/detector/make_view.py --src <data>/v3/ds480 --dst <data>/v3/ds256 --eval-interp nearest
+python tools/detector/pose_labels.py --src <data>/v3/ds256 --truth <data>/v3/truth.jsonl --dst <data>/v3/ds256p
+python tools/detector/train_pose.py --data <data>/v3/ds256p/data.yaml --name pose_n4           # ~50 min sur RTX 3080
+# planches de contrôle des points
+python tools/detector/kpt_sheet.py plan --out <sheet_plan.json>   # puis rendu avec --truth, puis :
+python tools/detector/kpt_sheet.py draw --renders <rendus> --truth <truth.jsonl> --out <data>/head/planches_points
+```
+
+**Les 20 points** (`pose_labels.NAMES`) : 0 à 4 = la zone où le jeu compte un tir à la tête (centre, bord gauche, bord droit, haut, bas) ; 5 nez (l'os est
+entre le nez et la lèvre), 6 et 7 les yeux (absents quand le visage est de dos, et pour kayo et omen qui n'ont pas de visage) ; 8 à 19 épaules, coudes, mains,
+hanches, genoux, pieds. Les points viennent du squelette et des capsules, jamais d'un modèle.
+
+**Ce que le banc mesure** : tête trouvée, erreur sur son centre (px à 256), « si on tirait sur le centre annoncé, serait-ce un tir à la tête ? », et la décision
+du tir automatique (réticule au centre de l'image : tire-t-il quand il est sur la tête, et à tort quand il n'y est pas). Décision sur UNE image : la chaîne réelle
+ajoute un suivi sur plusieurs images. Le banc trie les idées ; le stand de tir sur la chaîne complète ne sert plus qu'à confirmer le candidat retenu.
+
+### Ce qui a été constaté
+
+* **Le réticule dessiné dans les images d'entraînement fausse tout de loin.** Les jeux v1 / v2 portent l'ancien réticule du jeu (4 traits de 9 px avec contour noir)
+  dans 90 % des images. Un modèle pose entraîné dessus, puis jugé avec ce réticule posé sur une tête à plus de 40 m, annonce la tête 5 px trop haut : il prend le
+  trait du haut pour la personne. Le réticule n'est pas dans les rendus (compose.py l'ajoutait) : **le jeu v3 est recomposé sans aucun réticule** (`--reticle none`),
+  et il compte 5 600 situations où la tête est près du centre de l'image (les jeux v1 / v2 n'en ont presque pas).
+* **Les modèles pose livrés (COCO) ne conviennent pas tels quels**, quelle que soit leur taille (n, s, m, l, x) : 64 à 70 % de têtes trouvées, 6 à 7 px d'erreur,
+  aucune au-delà de 40 m. Vitesse sur le Mac de la chaîne (Core ML, Neural Engine, 256 px) : n 0,37 ms · s 0,65 · m 1,34 · l 1,60 · x 3,30 ; yolo11n-seg actuel : 0,42.
+* **La zone « tête » du jeu était trop haute** (du nez à 6 cm au-dessus des cheveux) : descendue le 2026-11-17 sur la tête dessinée (menton 1,83 m → 2,14 m ;
+  `game/scripts/enemy.gd`, voir le README du dépôt). Un modèle public de découpage du visage (`jonathandinu/face-parsing`, SegFormer, photos de vraies personnes),
+  à qui on donne la tête recadrée, confirme de face : 97 % de ce qu'il appelle « tête » tombe dans la nouvelle zone, son menton est à 0,8 cm du bas de la zone
+  (médiane sur 28 personnages ; de −8 à +8 cm : barbes, capuches, masques). De côté et de dos il est moins sûr (62 % et 69 %), et sur l'image entière il ne vaut
+  rien (épaulettes prises pour de la peau) : ce n'est pas un outil d'étiquetage, seulement un second avis.
+* **gekko** : sa pose neutre affichée est à 8 cm de la pose de repos sur laquelle le jeu posait les capsules (corrigé dans enemy.gd). **veto** s'affiche blanc
+  (modèle abîmé) : écarté des données, du banc et des planches (`--exclude veto` par défaut). harbor, écarté des jeux v1 / v2 pour la même raison, s'affiche
+  normalement aujourd'hui mais reste écarté du jeu (world.gd).
+* Quelques personnages récents (clove, miks, tejo, waylay) nomment autrement les os du visage : `gen_dataset.gd` (`BONE_ALT`) les ramène aux mêmes points.
+
+### Résultats du banc (2 700 situations, nouvelle zone « tête », sans veto ; décision sur une image, confiance ≥ 0,5)
+
+`seg` = le modèle actuel de la chaîne (`yolo11n-seg-ft2`) avec sa règle « tête = 8 % du haut de la boîte » ; `pose` = `yolo11n-pose` réentraîné sur le jeu v3
+(37 741 images, aucun réticule, 20 points, 40 passes : `runs/pose_n4`), zone annoncée réduite à 80 % (`shrink=0.8`). Vitesse sur le Mac (Core ML, Neural Engine) :
+pose 0,38 ms, seg 0,42 ms.
+
+Images de test SANS réticule :
+
+| | tête trouvée | erreur du centre (médiane) | viser le centre = tir à la tête | tire quand le réticule est sur la tête | tire à tort | tirs justes |
+|---|---|---|---|---|---|---|
+| seg, personnage entier | 89,9 % | 1,51 px | 86,7 % | 38,9 % | 3,7 % | 75,5 % |
+| **pose**, personnage entier | 96,4 % | 0,70 px | 96,4 % | 65,0 % | 1,2 % | 94,1 % |
+| seg, derrière un muret | 66,6 % | 5,15 px | 62,0 % | 9,4 % | 0,9 % | 75,3 % |
+| **pose**, derrière un muret | 85,9 % | 0,87 px | 85,9 % | 57,7 % | 1,7 % | 91,0 % |
+| seg, derrière un angle de mur | 81,3 % | 2,19 px | 73,6 % | 35,9 % | 3,8 % | 68,6 % |
+| **pose**, derrière un angle de mur | 90,9 % | 0,91 px | 87,5 % | 55,8 % | 1,2 % | 91,5 % |
+
+Par distance (personnage entier, sans réticule), « viser le centre = tir à la tête » : < 10 m seg 96,9 % / pose 100 % ; 10–20 m 99,4 / 100 ; 20–40 m 81,1 / 98,1 ;
+≥ 40 m 45,5 / 77,6 (au-delà de 40 m la tête fait 1 à 1,5 px de rayon à 256 px ; le modèle ne trouve plus 22 % des personnages).
+`shrink` règle le compromis : 1,0 → tire 81,8 %, à tort 6,1 % ; 0,8 → 65,0 % / 1,2 % ; 0,65 → 43,4 % / 0,1 %.
+
+**Avec le réticule du jeu dessiné dans l'image de test** (le modèle n'en a jamais vu à l'entraînement), personnage entier, pose `shrink=0.8` :
+
+| réticule dans l'image | viser = tête, < 20 m | viser = tête, 20–40 m | viser = tête, ≥ 40 m | tire à tort, < 20 m | tire à tort, 20–40 m | tire à tort, ≥ 40 m |
+|---|---|---|---|---|---|---|
+| aucun | 100 % | 98,1 % | 77,6 % | 0,4–1,0 % | 2,2 % | 2,4 % |
+| « small » (celui du jeu aujourd'hui) | 100 % | 96,2 % | 63,8 % | 0,6–1,2 % | 7,2 % | 14,9 % |
+| « classic » (l'ancien) | 98–100 % | 39,9 % | 1,0 % | 0,8–7,5 % | 10,1 % | 3,5 % |
+
+Jusqu'à 20 m le réticule ne change rien. Au-delà, un modèle qui n'a jamais vu de réticule prend ses traits pour un morceau de la personne quand il est posé dessus :
+avec l'ancien réticule il « trouve » une personne dans 100 % des images lointaines, 5 px à côté de la tête.
+
+**Comparaison : mêmes images, mêmes réglages, mais des réticules variés dessinés à l'entraînement** (`compose.py --reticle mix` : 55 % « small », 20 % « classic »,
+10 % point, 15 % aucun ; `runs/pose_n5_reticules`, résultats dans `<data>/head/res_compare_{none,small,classic}.json`). Personnage entier, `shrink=0.8`,
+« sans » = `pose_n4` (aucun réticule à l'entraînement), « variés » = `pose_n5_reticules` :
+
+| réticule dans l'image de test | modèle | tête trouvée | viser = tête | viser = tête, 20–40 m | viser = tête, ≥ 40 m | tire | tire à tort | à tort, 20–40 m | à tort, ≥ 40 m | tirs justes |
+|---|---|---|---|---|---|---|---|---|---|---|
+| aucun | sans | 96,4 % | 96,4 % | 98,1 % | 77,6 % | 65,0 % | 1,2 % | 2,2 % | 2,4 % | 94,1 % |
+| aucun | variés | 96,4 % | 96,4 % | 98,6 % | 76,9 % | 69,0 % | 1,1 % | 2,0 % | 1,7 % | 95,1 % |
+| « small » (le jeu aujourd'hui) | sans | 97,2 % | 94,0 % | 96,2 % | 63,8 % | 69,2 % | 4,1 % | 7,2 % | 14,9 % | 83,2 % |
+| « small » (le jeu aujourd'hui) | variés | 96,6 % | 96,6 % | 98,5 % | 78,7 % | 71,0 % | 1,3 % | 2,5 % | 3,8 % | 94,0 % |
+| « classic » (l'ancien) | sans | 100 % | 72,4 % | 39,9 % | 1,0 % | 48,1 % | 4,8 % | 10,1 % | 3,5 % | 74,8 % |
+| « classic » (l'ancien) | variés | 98,3 % | 83,4 % | 78,4 % | 17,7 % | 57,5 % | 2,1 % | 4,5 % | 4,5 % | 89,0 % |
+
+Lecture : voir des réticules à l'entraînement ne coûte rien quand il n'y en a pas dans l'image (mêmes chiffres à la marge près), et efface l'effet du réticule
+actuel du jeu (à tort 1,3 % au lieu de 4,1 % ; au-delà de 40 m 3,8 % au lieu de 14,9 %). Derrière un muret, réticule « small » : à tort 1,7 % au lieu de 6,3 % ;
+derrière un angle de mur : 1,8 % au lieu de 3,3 %. L'ancien gros réticule reste un problème de loin même pour ce modèle (17,7 % au-delà de 40 m) : ses traits de
+9 px recouvrent une tête de 2 à 3 px, il n'y a plus rien à voir. Non essayé : retirer le réticule de l'image avant le réseau (côté Mac), qui laisserait le
+modèle « sans » tel quel.
+
+**Décision (Antoine, 2026-11-18) : le modèle « réticules variés »** (`pose_n5_reticules`). Il est branché dans la chaîne deux machines (dépôt aimlabs-pipeline,
+`sniper_b.py --head-model`, sur le Mac `yolo11n-pose-jeu5_256.mlpackage`) : il remplace le modèle de silhouette tant que le tir « uniquement sur la tête » est activé.
+
+**Forme et taille de la zone visée** (même banc, réticule « small », personnage entier, `pose_n5_reticules` ; tire quand le réticule est sur la tête / tire à tort) :
+
+| `shrink` | rectangle (`shape=box`) | ellipse (`shape=ellipse`) |
+|---|---|---|
+| 1,0 | 90,8 % / 6,9 % | 85,3 % / 2,6 % |
+| 0,9 | 84,6 % / 2,9 % | **74,2 % / 0,7 %** (retenu) |
+| 0,8 | 71,0 % / 1,3 % | 57,9 % / 0,2 % |
+| 0,7 | 55,1 % / 0,4 % | – |
+| 0,6 | 40,0 % / 0,0 % | – |
+
+La zone « tête » du jeu est une capsule, arrondie en haut et en bas : les coins du rectangle sont hors de la tête. L'ellipse à 0,9 tire plus que le rectangle à 0,8 et se
+trompe deux fois moins. Sur la chaîne réelle (stand de tir du jeu, 72 traversées visées dans la tête, 5 à 25 m) : ancienne règle 35 tirs à la tête, rectangle 0,8 : 58,
+ellipse 0,9 : 63 ; aucun tir dans le corps, aucun tir sur les 48 traversées visées au-dessus ou au-dessous de la tête (détail : `docs/PIPELINE.md` du dépôt aimlabs-pipeline,
+« Modèle de tête »). `tools/head_model_check.py` de ce dépôt-là contrôle que le modèle converti pour le Mac voit les mêmes têtes que celui du banc.
+
+Pistes non essayées pour un meilleur modèle : plus de passes (40 ici ; le score de validation des points montait encore, 0,451 à la 35e, 0,458 à la 40e), plus d'images des cas
+faibles (au-delà de 40 m, derrière un muret), une taille au-dessus (s : 0,65 ms sur le Mac au lieu de 0,37). Les tailles s / m / l / x n'ont été jugées que telles que livrées.
+Au-delà de 40 m la tête fait 2 à 3 px dans l'image de 256 px donnée au réseau : aucun entraînement ne rend ce qui n'est pas dans l'image.
+
+Le fichier des images préparées porte maintenant les variantes dans son nom quand elles ne sont pas toutes demandées (`….small.libre.npy`) : `--variants libre` réécrivait
+sinon le fichier des trois variantes.
+
 ## Choix (et pourquoi)
 
 * **Étiquettes = canal alpha du rendu du personnage seul**, avant d'ajouter le fond. Silhouette exacte (bras, jambes, personnage
