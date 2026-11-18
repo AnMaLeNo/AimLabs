@@ -23,6 +23,16 @@ const SEGMENTS := [
 	["R_Knee", "R_Foot", "body", 0.08],
 ]
 const HEAD_RADIUS := 0.12
+## Head capsule: its axis runs from HEAD_AXIS_LOW to HEAD_AXIS_HIGH above the Head bone (1.92 m on the shared skeleton), so with the
+## radius it spans 1.83 m (the chin: M_Chin bone 1.81-1.86 m over the 29 agents, median 1.84) to 2.14 m (top of the drawn head with
+## its hair: 2.07-2.17 m, median 2.11). Until 2026-11-17 the axis ran from -0.02 to +0.16: the zone reached 2.20 m, in the empty sky
+## above the hair, and - the torso capsule covering its lower part - only started at the nose (1.89 m): a shot on the mouth or the
+## chin counted as a body shot. Measured on renders of every agent (tools/detector/kpt_sheet.py).
+const HEAD_AXIS_LOW := 0.03
+const HEAD_AXIS_HIGH := 0.10
+## The torso capsule stops this far below the Neck bone (1.78 m): its rounded top (radius 0.17) then ends at the chin (1.83 m)
+## instead of passing in front of the lower half of the face (it used to reach 1.95 m).
+const TORSO_NECK_DROP := 0.12
 
 @export var agent_slug := ""
 @export var max_hp := 100
@@ -101,7 +111,8 @@ func _play_idle() -> void:
 	_anim.seek(randf() * _anim.current_animation_length, true)
 
 
-## Capsules between skeleton bones, measured on the rest pose (the idle barely moves).
+## Capsules between skeleton bones. Neutral pose (the one the game uses): measured on the pose that is DRAWN - for 28 agents it
+## is the rest pose, but gekko's neutral clip stands 8 cm off it and his head zone was beside his head. Other poses: rest pose.
 func _build_hitboxes() -> void:
 	if _skeleton == null:
 		_add_capsule("body", LAYER_ENEMY_BODY, Vector3(0, 0.1, 0), Vector3(0, 1.5, 0), 0.25)
@@ -113,6 +124,8 @@ func _build_hitboxes() -> void:
 		var b: Variant = _bone_pos(String(seg[1]), skel_xf)
 		if a == null or b == null:
 			continue
+		if String(seg[0]) == "Pelvis" and String(seg[1]) == "Neck":
+			b = (b as Vector3) - Vector3(0, TORSO_NECK_DROP, 0)
 		_add_capsule(String(seg[2]), LAYER_ENEMY_BODY, a, b, float(seg[3]))
 	# hips: the leg capsules start at the Pelvis bone (~1.23 m) and leave the coat/hips uncovered
 	# (bench visual probe: silhouette 0.65 m wide at 1.0 m, hitbox 0.3 m) → one capsule as wide as the coat
@@ -121,8 +134,7 @@ func _build_hitboxes() -> void:
 		_add_capsule("body", LAYER_ENEMY_BODY, pelvis, pelvis - Vector3(0, 0.3, 0), 0.3)
 	var head: Variant = _bone_pos("Head", skel_xf)
 	if head != null:
-		var top: Vector3 = head + Vector3(0, 0.16, 0)
-		_add_capsule("head", LAYER_ENEMY_HEAD, head - Vector3(0, 0.02, 0), top, HEAD_RADIUS)
+		_add_capsule("head", LAYER_ENEMY_HEAD, head + Vector3(0, HEAD_AXIS_LOW, 0), head + Vector3(0, HEAD_AXIS_HIGH, 0), HEAD_RADIUS)
 		_head_local = head + Vector3(0, 0.03, 0)  # eye level; +0.07 grazed the top of the skull (bench, visual probe)
 	var chest: Variant = _bone_pos("Spine3", skel_xf)
 	if chest != null:
@@ -133,6 +145,8 @@ func _bone_pos(bone: String, skel_xf: Transform3D) -> Variant:
 	var i := _skeleton.find_bone(bone)
 	if i < 0:
 		return null
+	if neutral_pose and _idle != "":
+		return skel_xf * _skeleton.get_bone_global_pose(i).origin
 	return skel_xf * _skeleton.get_bone_global_rest(i).origin
 
 

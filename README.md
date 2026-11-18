@@ -83,9 +83,17 @@ jeu a un écran) — un petit viewport rend *uniquement* les mailles de la cible
 réticule à chaque frame rendue : c'est exactement ce qu'un algo de vision peut voir, indépendamment
 des hitboxes ; et la **hitbox** (rayon physique du réticule à chaque tick, seule vérité en headless).
 Les deux sont enregistrées et dessinées (filet bleu = silhouette, violet = hitbox) : leur écart
-mesure les défauts de hitbox (ex. : les capsules des jambes laissent un trou au bassin ; la
-capsule de tête dépasse au-dessus du crâne). La cible se déplace **par frame rendue**, pas par tick
+mesure les défauts de hitbox (ex. : les capsules des jambes laissent un trou au bassin). La cible se déplace **par frame rendue**, pas par tick
 physique : à 30 m/s un tick de 60 Hz serait un saut de 0,5 m, toute la silhouette.
+
+**Zone « tête » (depuis le 2026-11-17)** : capsule de 12 cm de rayon qui va du menton (1,83 m) au sommet de la tête dessinée avec ses
+cheveux (2,14 m) ; le torse s'arrête au menton. Avant, la zone montait à 2,20 m, dans le vide au-dessus des cheveux, et ne commençait
+qu'au nez (1,89 m) parce que le torse passait devant le bas du visage : un tir sur la bouche ou le menton comptait « corps ». Les tirs
+à la tête comptés avant cette date ne sont donc pas comparables à ceux d'après. Réglée sur des mesures faites sur les 29 personnages
+(os du menton : 1,81 à 1,86 m ; sommet de la silhouette : 2,07 à 2,17 m) et contrôlée à l'œil sur des planches
+(`tools/detector/kpt_sheet.py`) ; constantes `HEAD_AXIS_LOW`, `HEAD_AXIS_HIGH`, `TORSO_NECK_DROP` de `game/scripts/enemy.gd`. En pose
+neutre les zones sont posées sur la pose affichée (gekko : sa pose neutre est à 8 cm de la pose de repos du squelette, sa zone « tête »
+était à côté de sa tête).
 
 Sorties : résumé dans le HUD et la console (`BENCH DONE 5 m : 12,0 m/s, 10 m : …`),
 `bench_results/trigger_<algo>_<date>.json` (par traversée : marques justes/fausses, couverture
