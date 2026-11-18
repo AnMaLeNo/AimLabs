@@ -27,12 +27,12 @@ RENDER = 480
 
 def run(bench, cfg, a, tag):
     crop, net = cfg
-    out = os.path.join(a.out, f"{tag}_c{crop}_n{net}" + (f"_j{a.jpeg}" if a.jpeg else "") + ".cases.json")
+    out = os.path.join(a.out, f"{tag}_c{crop}_n{net}" + (f"_j{a.jpeg}" + ("" if a.jpeg_chroma == "420" else "c" + a.jpeg_chroma) if a.jpeg else "") + ".cases.json")
     if not os.path.exists(out) or a.redo:
         renders, truth, plan = bench
         spec = f"m=jeu,{a.model}" + ("," + a.params if a.params else "")
         cmd = [sys.executable, os.path.join(HERE, "head_bench.py"), "--renders", renders, "--truth", truth, "--plan", plan, "--reticle", a.reticle, "--variants", *a.variants,
-               "--net", str(net), "--zoom", f"{RENDER / crop:g}", "--jpeg", str(a.jpeg), "--batch", "64", "--models", spec, "--cases-out", out]
+               "--net", str(net), "--zoom", f"{RENDER / crop:g}", "--jpeg", str(a.jpeg), "--jpeg-chroma", a.jpeg_chroma, "--batch", "64", "--models", spec, "--cases-out", out]
         r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
         if r.returncode != 0:
             sys.exit(r.stdout[-2000:] + r.stderr[-2000:])
@@ -75,6 +75,7 @@ def main() -> None:
     ap.add_argument("--variants", nargs="+", default=["libre"])
     ap.add_argument("--reticle", default="small")
     ap.add_argument("--jpeg", type=int, default=60, help="qualité JPEG de l'image donnée au réseau, comme dans la chaîne (0 : pixels intacts)")
+    ap.add_argument("--jpeg-chroma", default="444", choices=["444", "422", "420"], help="couleur du JPEG (444 : ce qu'envoie l'agent depuis le 2026-11-18)")
     ap.add_argument("--times", default="", help="temps d'inférence par côté de réseau, ex. 256=0.37,384=0.62 (ms, mesurés sur la machine B)")
     ap.add_argument("--out", required=True)
     ap.add_argument("--redo", action="store_true")

@@ -196,6 +196,59 @@ Au-delà de 40 m la tête fait 2 à 3 px dans l'image de 256 px donnée au rése
 Le fichier des images préparées porte maintenant les variantes dans son nom quand elles ne sont pas toutes demandées (`….small.libre.npy`) : `--variants libre` réécrivait
 sinon le fichier des trois variantes.
 
+## Quel carré donner au réseau, et à quelle échelle (2026-11-18)
+
+La chaîne deux machines découpait un carré de 384 px de l'écran autour du réticule et le réduisait à 256 px (× 0,67) : une tête lointaine y perd un tiers de sa taille.
+`crop_study.py` rejoue le banc pour une grille « carré à l'écran : côté donné au réseau » et pour des paires de carrés, par distance ; `head_bench.py` a reçu pour cela
+`--net` (côté du réseau), `--zoom` (carré central de 480 / zoom px), `--jpeg` et `--jpeg-chroma` (l'image compressée comme dans la chaîne), `--interp` (réduction), et un
+banc lointain (60 à 120 m : `head_plan.py`, fichiers `far_*` de `<data>/head`).
+
+```sh
+python tools/detector/crop_study.py --bench <bench_renders>,<bench_truth.jsonl>,<bench_plan.json> --bench <far_renders>,<far_truth.jsonl>,<far_plan.json> \
+    --model <data>/head/pose_n7_384.pt --configs 384:256 384:384 --pairs 384:256+128:256 --jpeg 60 --times 256=0.37,384=0.61 --out <data>/head/crop_study_n7_384
+# jeu d'images à l'échelle de l'écran : carré central de 384 px des rendus, sans réduction, compressé en JPEG (qualité tirée entre 45 et 95). Une fois par jeu rendu
+# à 480 px, avec sa vérité, vers le même dossier : <data>/v3r/ds480 (réticules variés) et <data>/v4/ds480f (5 400 têtes de 40 à 120 m, plan `far_plan.json`)
+python tools/detector/pose_labels.py --src <ds480> --truth <truth.jsonl> --dst <data>/v4/ds384p --crop 384 --jpeg 45 95
+python tools/detector/train_pose.py --data <data>/v4/ds384p/data.yaml --name pose_n7_384 --imgsz 384 --epochs 40 --batch 96 --weights <data>/head/pose_n5_reticules.pt
+```
+
+**Ce qui a été mesuré** (réticule « small », personnage entier, décision sur une image ; distances pour un écran 1440p) :
+
+* **C'est l'échelle qui compte, pas la taille du carré à l'écran.** Modèle `pose_n5_reticules` (entraîné à × 0,53), pixels intacts, têtes trouvées : carré 384 réduit à 256
+  (× 0,67) 93 % entre 40 et 60 m, 53 % entre 60 et 90 m, 10 % au-delà ; pixels de l'écran sans réduction (× 1) 100 / 94,5 / 58 % ; carré de 128 px agrandi deux fois 100 / 100 /
+  99 %, mais 69 % seulement sous 10 m (le personnage ne tient plus dans le carré). Une paire « 384:256 + 128:256 » fait ≥ 98,9 % partout pour 0,74 ms sur le Mac, mais ne gagne
+  qu'au-delà de 60 m sur un seul carré de 384 px sans réduction (0,61 ms) : **un seul carré, sans réduction**, est retenu.
+* **Un modèle doit être entraîné à l'échelle où il sert.** `pose_n7_384` : même réseau (yolo11n-pose), entraîné sur 39 905 images à l'échelle de l'écran (carré de 384 px
+  des rendus, non réduit, compressé en JPEG, réticules à cette échelle, dont 5 400 têtes de 40 à 120 m), 40 passes en partant de `pose_n5_reticules`. Image compressée en
+  JPEG 60, « tire quand le réticule est sur la tête » / « tire à tort » :
+
+  | modèle, carré:réseau | < 10 m | 10–20 m | 20–40 m | 40–60 m | 60–90 m | ≥ 90 m | calcul sur le Mac |
+  |---|---|---|---|---|---|---|---|
+  | `pose_n5_reticules`, 384:256 (avant) | 79,7 / 0,0 | 76,3 / 0,0 | 62,2 / 0,0 | 57,4 / 0,0 | 23,8 / 0,4 | 2,1 / 0,0 | 0,37 ms |
+  | `pose_n5_reticules`, 384:384 | 76,1 / 0,0 | 75,6 / 0,0 | 67,4 / 0,0 | 61,4 / 0,0 | 50,0 / 0,8 | 26,6 / 0,3 | 0,61 ms |
+  | `pose_n7_384`, 384:256 | 76,9 / 0,0 | 76,3 / 0,0 | 62,2 / 0,0 | 65,3 / 0,0 | 28,7 / 0,6 | 0,0 / 0,0 | 0,37 ms |
+  | **`pose_n7_384`, 384:384** (retenu) | 76,1 / 0,0 | 71,8 / 0,0 | 70,4 / 0,0 | 71,3 / 0,3 | 66,4 / 0,8 | 37,2 / 0,6 | 0,61 ms |
+
+  Têtes trouvées, `pose_n7_384` en 384:384 : 100 % jusqu'à 60 m, 96,8 % entre 60 et 90 m, 65,6 % au-delà (tête de moins de 3 px de haut).
+  **`pose_n7_384` est depuis le 2026-11-18 le modèle de tête par défaut de la chaîne deux machines** (sur le Mac `yolo11n-pose-jeu7_{256,320,384}.mlpackage`), donné en
+  pixels de l'écran. Stand de tir sur la chaîne complète, 108 traversées visées dans la tête à 25, 35 et 45 m dans une fenêtre 720p (la tête y est comme à 50, 70 et 90 m sur
+  un écran 1440p) : 103 tirs à la tête, contre 71 avec `pose_n5_reticules` sur l'image réduite (détail : `docs/PIPELINE.md` du dépôt aimlabs-pipeline).
+* **Plus de passes n'est pas un levier** : `pose_n6_e100` (100 passes au lieu de 40, mêmes images que `pose_n5_reticules`) gagne 0,026 au score de validation des points
+  (0,484 contre 0,458) et presque rien au banc (têtes trouvées entre 40 et 60 m : 80,2 % contre 77,5 %), avec un peu plus de tirs à tort.
+* **La réduction « plus proche voisin » d'OpenCV décale l'image.** `cv2.INTER_NEAREST` prend le coin de chaque pixel d'arrivée : le contenu glisse de 0,33 px (384 → 256)
+  ou 0,47 px (480 → 256) vers le bas et la droite (mesuré sur le barycentre d'une tache ; PIL, le bilinéaire et l'aire ne décalent rien). Le banc s'en servait jusqu'au
+  2026-11-18 pour imiter `sniper_b` (qui, lui, réduit avec PIL, sans décalage) : ses chiffres « image réduite » portaient ce décalage, d'où des tirs à tort de loin (2,3 % entre
+  40 et 60 m, 0,0 % une fois corrigé). `head_bench.py --interp` vaut maintenant `bilinear` (la réduction de l'agent) et `nearest` est centré ; les tableaux plus haut dans ce
+  fichier (zone « tête », réticules, forme de la zone) datent d'avant la correction : les classements tiennent (tous les candidats portaient le même décalage), les valeurs
+  absolues de loin sont pessimistes.
+* **Le banc ne voit pas ce que le JPEG fait aux vraies images du jeu.** Sur les rendus du banc, compresser en JPEG 60 (couleur sous-échantillonnée 4:2:0, le réglage
+  d'OpenCV) ne déplace pas la tête annoncée par `pose_n7_384` (0,00 à 0,08 px). Sur les vraies images de la chaîne, le même JPEG la fait annoncer 0,22 px d'écran trop bas, et
+  les tirs visés en haut d'une tête lointaine ne partent plus ; avec la couleur entière (4:4:4) : 0,06 px ; sans compression : 0,04 px. C'est l'agent qui a été corrigé
+  (dépôt aimlabs-pipeline : `agent_a.py --jpeg-chroma 444`, mesuré par `tools/head_session_check.py --jpeg` sur une session enregistrée sans compression). Pourquoi les rendus
+  du banc n'y sont pas sensibles n'est pas établi.
+* **Par personnage**, le milieu de la zone annoncée par `pose_n7_384` s'écarte de −5 % à +5 % de la hauteur de la tête selon le personnage (jett : +2,9 %) : la zone du jeu est
+  la même capsule pour tous, les têtes dessinées non.
+
 ## Choix (et pourquoi)
 
 * **Étiquettes = canal alpha du rendu du personnage seul**, avant d'ajouter le fond. Silhouette exacte (bras, jambes, personnage

@@ -5,7 +5,7 @@ Pourquoi : juger une idée sur la détection de la tête (un autre modèle, un s
 complète (PC + Mac, 5 à 10 minutes par réglage). Ici les images sont rendues UNE fois par le jeu (`head_plan.py` : 2 800 situations de tir à la tête,
 tous les personnages, 3 à 60 m, réticule posé autour de la tête) avec la vérité du moteur (`gen_dataset.gd --truth` : quels pixels sont un tir à la
 tête, vérifié contre les vrais rayons du jeu par `head_truth.py check`). Chaque candidat est ensuite jugé hors ligne sur les mêmes images, réduites à
-256 px comme le fait sniper_b (plus proche voisin), avec le réticule du jeu dessiné au centre (`--reticle`, défaut « small » : celui que le jeu dessine
+256 px comme le fait l'agent de la chaîne deux machines (bilinéaire, `--interp`), avec le réticule du jeu dessiné au centre (`--reticle`, défaut « small » : celui que le jeu dessine
 aujourd'hui ; « classic » : l'ancien, qui couvre une tête au-delà de 40 m ; voir compose.draw_reticle).
 
 Trois variantes de chaque image : « libre » (personnage entier), « muret » (un mur cache le bas du corps, il reste la tête et plus ou moins de torse),
@@ -79,14 +79,29 @@ def build_cases(a) -> List[dict]:
     return cases
 
 
+CHROMA = {"444": cv2.IMWRITE_JPEG_SAMPLING_FACTOR_444, "422": cv2.IMWRITE_JPEG_SAMPLING_FACTOR_422, "420": cv2.IMWRITE_JPEG_SAMPLING_FACTOR_420}
+
+
+def shrink(img: np.ndarray, n: int, interp) -> np.ndarray:
+    """Réduit l'image au côté du réseau SANS déplacer son contenu. `interp` None = plus proche voisin pris au centre de chaque pixel d'arrivée, comme PIL
+    (`fit_crop` de sniper_b). cv2.INTER_NEAREST, lui, prend le coin : le contenu glisse de (rapport − 1) / 2 pixel de départ vers le bas et la droite, soit
+    0,33 px d'arrivée de 384 à 256 px et 0,47 px de 480 à 256 px (mesuré le 2026-11-18 sur le barycentre d'une tache). Le banc l'a utilisé jusqu'à cette
+    date : ses chiffres « image réduite » portaient ce décalage, que la chaîne réelle n'a pas (agent_a.py réduit en bilinéaire, sniper_b avec PIL)."""
+    if interp is not None:
+        return cv2.resize(img, (n, n), interpolation=interp)
+    idx = ((np.arange(n) + 0.5) * img.shape[0] / n).astype(np.int64)
+    return np.ascontiguousarray(img[idx][:, idx])
+
+
 def load_images(a, cases: List[dict]) -> np.ndarray:
     """Les images telles que le réseau les reçoit (mur, réticule, réduction à 256 px), dans l'ordre de `cases`. Préparées une fois puis relues d'un
     fichier .npy à côté de la vérité (1,6 Go pour 8 400 cas) : c'est ce qui rend le banc rapide."""
-    interp = {"nearest": cv2.INTER_NEAREST, "bilinear": cv2.INTER_LINEAR, "area": cv2.INTER_AREA}[a.interp]
+    interp = {"bilinear": cv2.INTER_LINEAR, "area": cv2.INTER_AREA}.get(a.interp)
     vs = [v for v in VARIANTS if any(c["variant"] == v for c in cases)]
     # (un fichier par jeu de variantes : `--variants libre` réécrivait sinon, en 4 minutes, le fichier des trois variantes, et inversement)
-    cache = (os.path.splitext(a.truth)[0] + f".{a.interp}.{a.reticle}" + ("" if vs == VARIANTS else "." + "-".join(vs))
-             + ("" if N == 256 else f".n{N}") + ("" if a.zoom == 1.0 else f".z{a.zoom:g}") + (f".j{a.jpeg}" if a.jpeg else "") + ".npy")
+    # (« nearestc » : les fichiers « nearest » d'avant le 2026-11-18 ont été réduits par cv2.INTER_NEAREST, dont le contenu est décalé : voir shrink)
+    cache = (os.path.splitext(a.truth)[0] + f".{'nearestc' if a.interp == 'nearest' else a.interp}.{a.reticle}" + ("" if vs == VARIANTS else "." + "-".join(vs))
+             + ("" if N == 256 else f".n{N}") + ("" if a.zoom == 1.0 else f".z{a.zoom:g}") + (f".j{a.jpeg}" + ("" if a.jpeg_chroma == "420" else "c" + a.jpeg_chroma) if a.jpeg else "") + ".npy")
     key = [c["id"] + c["variant"] for c in cases]
     if os.path.exists(cache) and os.path.exists(cache + ".json") and json.load(open(cache + ".json")) == key and not a.rebuild:
         return np.load(cache, mmap_mode="r")
@@ -101,9 +116,9 @@ def load_images(a, cases: List[dict]) -> np.ndarray:
             side = int(round(c["size"] / a.zoom))
             o = (c["size"] - side) // 2
             img = img[o:o + side, o:o + side]
-        img = img if img.shape[0] == N else cv2.resize(img, (N, N), interpolation=interp)
-        if a.jpeg:                                           # la chaîne deux machines envoie l'image en JPEG (agent_a.py --jpeg 60, couleur sous-échantillonnée 4:2:0)
-            img = cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, a.jpeg])[1], cv2.IMREAD_COLOR)
+        img = img if img.shape[0] == N else shrink(img, N, interp)
+        if a.jpeg:                                           # la chaîne deux machines envoie l'image en JPEG (agent_a.py --jpeg 60 --jpeg-chroma 444)
+            img = cv2.imdecode(cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, a.jpeg, cv2.IMWRITE_JPEG_SAMPLING_FACTOR, CHROMA[a.jpeg_chroma]])[1], cv2.IMREAD_COLOR)
         out[i] = img
     out.flush()
     json.dump(key, open(cache + ".json", "w"))
@@ -257,11 +272,16 @@ def main() -> None:
     ap.add_argument("--plan", required=True)
     ap.add_argument("--models", nargs="+", required=True, help="nom=type,modèle[,paramètre=valeur…] ; type : seg, coco, jeu")
     ap.add_argument("--conf", type=float, default=0.5)
-    ap.add_argument("--interp", default="nearest", choices=["nearest", "bilinear", "area"])
+    ap.add_argument("--interp", default="bilinear", choices=["nearest", "bilinear", "area"],
+                    help="réduction au côté du réseau : bilinear = celle de l'agent de la chaîne deux machines (agent_a.py --interp linear, défaut) ; nearest = "
+                    "plus proche voisin centré, celle de sniper_b quand il réduit lui-même")
     ap.add_argument("--reticle", default="small", choices=["small", "classic", "dot", "none"],
                     help="réticule dessiné au centre (défaut : celui du jeu aujourd'hui ; « classic » : l'ancien, gros, qui cache une tête lointaine)")
     ap.add_argument("--jpeg", type=int, default=0, help="qualité JPEG appliquée à l'image donnée au réseau (60 : ce qu'envoie la chaîne deux machines ; 0 : pixels intacts). "
                     "Constaté le 2026-11-18 : sur une tête de 4 px le JPEG déplace la zone annoncée d'un demi-pixel vers le bas, et le banc sans JPEG ne le voyait pas")
+    ap.add_argument("--jpeg-chroma", default="444", choices=["444", "422", "420"], help="couleur du JPEG : 444 = entière, ce qu'envoie l'agent depuis le 2026-11-18 ; 420 = "
+                    "sous-échantillonnée, ce qu'il envoyait avant. ATTENTION : sur les rendus de ce banc le 420 ne déplace pas la tête d'un modèle entraîné avec ; sur les vraies "
+                    "images du jeu il la déplace de 0,22 px (dépôt aimlabs-pipeline, tools/head_session_check.py --jpeg). Le banc ne remplace pas cette mesure-là")
     ap.add_argument("--net", type=int, default=256, help="côté de l'image donnée au réseau (256 : la chaîne d'aujourd'hui, qui réduit le carré de 480 px de l'écran)")
     ap.add_argument("--zoom", type=float, default=1.0, help="ne donner au réseau que le carré central de côté 480 / zoom (1,875 avec --net 256 : pixels de l'écran, sans réduction)")
     ap.add_argument("--batch", type=int, default=128)
