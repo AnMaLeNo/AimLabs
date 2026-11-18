@@ -112,9 +112,10 @@ chaque balle par un triangle (cyan touchée, magenta ratée) à la position de l
 Le bench attend le réarmement de l'arme entre deux traversées.
 
 Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
-`--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
+`--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights` (noms ci-dessus, ou un nombre = part de la hauteur de la tête :
+`--bench-heights=head,0.9` vise la tête puis juste sous sa hitbox, à 1,76 m),
 `--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-max-shots`, `--bench-mark-tolerance`, `--bench-settle`,
-`--bench-pause`, `--bench-out=<json>`, `--bench-fixed-speed=<m/s> --bench-passes=<N>` (N traversées à une seule vitesse → touches/N, plus stable que la recherche de la limite), `--bench-wait-client` (attend un client sans `--algo`). Menu Échap (map Stand de tir) : bouton **Benchmark tir
+`--bench-pause`, `--bench-out=<json>`, `--bench-fixed-speed=<m/s> --bench-passes=<N>` (N traversées à une seule vitesse → touches/N, plus stable que la recherche de la limite ; toutes les distances demandées sont jouées, même celles sans aucune touche), `--bench-wait-client` (attend un client sans `--algo`). Menu Échap (map Stand de tir) : bouton **Benchmark tir
 auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
 `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).
 
