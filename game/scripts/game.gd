@@ -13,6 +13,15 @@ extends Node
 ##                         (everything, each source switchable: state, meta, hud, timecode, truth); default real for
 ##                         --mode=remote and --mode=silent, training otherwise
 ##   --info-port=<n> --info-hz=<n>   ground-truth UDP stream (information option "truth"), default 7790 / 240
+##   --behavior=on|off|<file>   the game's own record of how the player plays (mouse, fire button, target visibility, shots),
+##                         for the « human score » (BehaviorLog, tools/behavior/); default on with --mode=silent, off otherwise.
+##                         on = <repo>/behavior_logs/<tag>_<date>.aimbeh, --behavior-tag=<name> (default: the mode name)
+##   --cases=<names|all>   scripted bench on the arena with a simulated player moving the view (BenchCases: flick_side, peek_preaim,
+##                         cross_preaim, two_far, two_near, sweep, peek_far, flick_far, mix) ; --case-repeats=<n> (10) ;
+##                         --cases-shooter=trigger[:<delay ms>[:<min visible ms>]] = the bench's own trigger instead of an outside
+##                         program. Every trial is marked in the behaviour record: tools/behavior/case_report.py reads it
+##   --max-fps=<n>         limit the rendering rate (default: no limit — ~1000 images/s on the reference PC for a 165 Hz screen)
+##   --crosshair=<style>   reticle: small (default: thin short arms, centre clear) | dot | classic (the former one, ~28 px across) | none
 ##   --shm=<name>          shared memory segment name (default: aimlabs)
 ##   --menu                with --screenshot: keep the Esc menu open
 ##   --algos=<dir>         folder scanned for algos (*.py), default: <repo>/algos
@@ -20,7 +29,9 @@ extends Node
 ##   --python=<cmd>        interpreter used to run algos (default: python3 / python)
 ##   --agent=<slug>        first-person arms (Kingdom Archives agent, default: jett)
 ##   --weapon=<slug>       held weapon (Kingdom Archives weapon, default: classic)
-##   --map=<name>          showcase (default) | range (shooting range, see World)
+##   --map=<name>          showcase (default) | range (shooting range, see World) | arena (walls, a target that appears)
+##   --scenario=<list>     arena: peek | cross | popup | mix (default), or several separated by commas (ScenarioDirector)
+##   --seed=<n>            arena: same sequence of appearances every run (default: different every run)
 ##   --target=<slug>       range: agent used as the moving target (default: jett)
 ##   --pattern=<name>      range: none | line | square | circle (default: line)
 ##   --size=<m>            range: travel (line) / side (square) / radius (circle), default 4
@@ -80,6 +91,8 @@ signal info_changed
 
 const TimeCodeScript := preload("res://scripts/timecode.gd")
 const TruthStreamScript := preload("res://scripts/truth_stream.gd")
+const BehaviorLogScript := preload("res://scripts/behavior_log.gd")
+const BenchCasesScript := preload("res://scripts/bench_cases.gd")
 
 var bridge: AimBridge
 var runner: AlgoRunner
@@ -89,6 +102,8 @@ var info_profile := "training"
 var info_toggles := { "state": true, "meta": true, "hud": true, "timecode": true, "truth": true }
 var timecode: Control
 var truth: Node
+var behavior: Node
+var cases: Node
 var _state_blocked := false
 var agent_slug := ""
 var weapon_slug := ""
@@ -121,6 +136,14 @@ func _ready() -> void:
 	runner.setup(String(_args.get("--algos", AlgoRunner.default_dir())), String(_args.get("--shm", "aimlabs")), String(_args.get("--python", "")))
 	set_weapon(String(_args.get("--weapon", "operator" if _args.has("--bench-sniper") else "classic")))
 	set_agent(String(_args.get("--agent", "jett")))
+	if _args.has("--max-fps"):
+		Engine.max_fps = maxi(int(_args["--max-fps"]), 0)        # 0 = no limit (the default: ~1000 images/s, the GPU at full load)
+	if _args.has("--crosshair"):
+		var ch := String(_args["--crosshair"])
+		if HUD.CROSSHAIRS.has(ch):
+			hud.crosshair_style = ch
+		else:
+			push_warning("--crosshair: unknown style '%s' (styles: %s)" % [ch, ", ".join(HUD.CROSSHAIRS)])
 	if _args.has("--pattern"):
 		world.set_pattern(String(_args["--pattern"]))
 	if _args.has("--size"):
@@ -131,6 +154,10 @@ func _ready() -> void:
 		world.set_range_distance(float(_args["--distance"]))
 	if _args.has("--target"):
 		world.target_slug = String(_args["--target"])
+	if _args.has("--scenario"):
+		world.scenario = String(_args["--scenario"])
+	if _args.has("--seed"):
+		world.scenario_seed = int(_args["--seed"])
 	if _args.has("--map"):
 		world.set_map(String(_args["--map"]))
 	bench = TriggerBench.new()
@@ -139,6 +166,14 @@ func _ready() -> void:
 	bench.setup(self)
 	bench.progress.connect(func(t: String) -> void: hud.bench_text = t)
 	_setup_info()
+	_setup_behavior()
+	if _args.has("--cases") and behavior != null:
+		var cs: Variant = _args["--cases"]
+		cases = BenchCasesScript.new()
+		cases.name = "BenchCases"
+		add_child(cases)
+		cases.setup(self, String(cs) if typeof(cs) == TYPE_STRING else "all", int(_args.get("--case-repeats", 10)),
+			String(_args.get("--cases-shooter", "")), int(_args.get("--seed", -1)))
 	menu.setup(self, runner)
 	menu.visible = not player.mouse_captured
 	player.mouse_capture_changed.connect(func(captured: bool) -> void: menu.visible = not captured)
@@ -295,6 +330,22 @@ func _setup_info() -> void:
 		else:
 			push_warning("--info: unknown option '%s' (options: %s)" % [p, ", ".join(INFO_KEYS)])
 	set_info_profile(profile)
+
+
+## --behavior=on|off|<file> : the game's own record of how the player plays (BehaviorLog), default on in silent mode.
+func _setup_behavior() -> void:
+	var spec := String(_args.get("--behavior", "on" if mode_name == "silent" or _args.has("--behavior-selftest") or _args.has("--cases") else "off"))
+	if spec == "off":
+		return
+	var file := spec
+	if spec == "on" or spec == "true":
+		var tag := String(_args.get("--behavior-tag", mode_name)).validate_filename()
+		file = AlgoRunner._repo_root().path_join("behavior_logs/%s_%s.aimbeh" % [tag, Time.get_datetime_string_from_system().replace(":", "-")])
+	behavior = BehaviorLogScript.new()
+	behavior.name = "BehaviorLog"
+	add_child(behavior)
+	var st: Variant = _args.get("--behavior-selftest", "")
+	behavior.setup(self, file, _args.has("--behavior-selftest"), String(st) if typeof(st) == TYPE_STRING else "")
 
 
 func info_on(key: String) -> bool:

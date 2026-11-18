@@ -29,7 +29,8 @@ const DEFAULTS := {
 	"sniper": false, "max_shots": 1,  # sniper: one bullet per sweep — success = ≥ 1 hit with ≤ max_shots shots
 	"truth": "auto",  # visual (silhouette under the reticle, what a vision algo sees) | hitbox | auto = visual when the probe works
 }
-## Aim heights as fraction of the head height (chest/head use the hitboxes directly).
+## Aim heights as fraction of the head height (chest/head use the hitboxes directly). A plain number is also accepted
+## (--bench-heights=0.9,head): that fraction of the head height, e.g. 0.9 = just under the head hitbox (neck / shoulders).
 const HEIGHT_FRACTIONS := { "feet": 0.08, "knees": 0.3, "pelvis": 0.52, "belly": 0.62, "chest": -1.0, "head": -2.0 }
 const RAY_MASK := (1 << 2) | (1 << 3) | (1 << 0)
 
@@ -114,7 +115,7 @@ func start(cfg: Dictionary = {}) -> bool:
 		_world.mover.set_physics_process(false)
 	_heights = PackedStringArray()
 	for h in String(config["heights"]).split(","):
-		if HEIGHT_FRACTIONS.has(h.strip_edges()):
+		if HEIGHT_FRACTIONS.has(h.strip_edges()) or (h.strip_edges().is_valid_float() and h.strip_edges().to_float() > 0.0):
 			_heights.append(h.strip_edges())
 	if _heights.is_empty():
 		_heights.append("chest")
@@ -166,7 +167,7 @@ func _emit(text: String) -> void:
 
 func _aim_y() -> float:
 	var h := _heights[_height_index]
-	var frac: float = HEIGHT_FRACTIONS[h]
+	var frac: float = HEIGHT_FRACTIONS[h] if HEIGHT_FRACTIONS.has(h) else h.to_float()
 	if frac == -1.0:
 		return _target.body_position().y - _target.global_position.y
 	if frac == -2.0:
@@ -582,7 +583,8 @@ func _end_distance() -> void:
 	_height_entry["distances"].append(_dist_entry)
 	print("bench: [%s] distance %.0f m → vitesse limite %.2f m/s (%d traversées)" % [_heights[_height_index], _distance, _lo, _dist_entry["sweeps"].size()])
 	var next_distance := _distance + float(config["distance_step"])
-	if _lo > 0.0 and next_distance <= float(config["distance_max"]):
+	# (fixed speed = a success rate at each distance, not a search: a distance without any success does not end the series)
+	if (_lo > 0.0 or float(config["fixed_speed"]) > 0.0) and next_distance <= float(config["distance_max"]):
 		_distance = next_distance
 		_begin_distance()
 		_next_sweep()

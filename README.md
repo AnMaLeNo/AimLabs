@@ -83,9 +83,17 @@ jeu a un écran) — un petit viewport rend *uniquement* les mailles de la cible
 réticule à chaque frame rendue : c'est exactement ce qu'un algo de vision peut voir, indépendamment
 des hitboxes ; et la **hitbox** (rayon physique du réticule à chaque tick, seule vérité en headless).
 Les deux sont enregistrées et dessinées (filet bleu = silhouette, violet = hitbox) : leur écart
-mesure les défauts de hitbox (ex. : les capsules des jambes laissent un trou au bassin ; la
-capsule de tête dépasse au-dessus du crâne). La cible se déplace **par frame rendue**, pas par tick
+mesure les défauts de hitbox (ex. : les capsules des jambes laissent un trou au bassin). La cible se déplace **par frame rendue**, pas par tick
 physique : à 30 m/s un tick de 60 Hz serait un saut de 0,5 m, toute la silhouette.
+
+**Zone « tête » (depuis le 2026-11-17)** : capsule de 12 cm de rayon qui va du menton (1,83 m) au sommet de la tête dessinée avec ses
+cheveux (2,14 m) ; le torse s'arrête au menton. Avant, la zone montait à 2,20 m, dans le vide au-dessus des cheveux, et ne commençait
+qu'au nez (1,89 m) parce que le torse passait devant le bas du visage : un tir sur la bouche ou le menton comptait « corps ». Les tirs
+à la tête comptés avant cette date ne sont donc pas comparables à ceux d'après. Réglée sur des mesures faites sur les 29 personnages
+(os du menton : 1,81 à 1,86 m ; sommet de la silhouette : 2,07 à 2,17 m) et contrôlée à l'œil sur des planches
+(`tools/detector/kpt_sheet.py`) ; constantes `HEAD_AXIS_LOW`, `HEAD_AXIS_HIGH`, `TORSO_NECK_DROP` de `game/scripts/enemy.gd`. En pose
+neutre les zones sont posées sur la pose affichée (gekko : sa pose neutre est à 8 cm de la pose de repos du squelette, sa zone « tête »
+était à côté de sa tête).
 
 Sorties : résumé dans le HUD et la console (`BENCH DONE 5 m : 12,0 m/s, 10 m : …`),
 `bench_results/trigger_<algo>_<date>.json` (par traversée : marques justes/fausses, couverture
@@ -112,9 +120,10 @@ chaque balle par un triangle (cyan touchée, magenta ratée) à la position de l
 Le bench attend le réarmement de l'arme entre deux traversées.
 
 Réglages `--bench-distance-start/-step/-max`, `--bench-speed-start/-min/-max`, `--bench-precision`,
-`--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights`,
+`--bench-confirm`, `--bench-width` (1,2 m), `--bench-travel-widths`, `--bench-heights` (noms ci-dessus, ou un nombre = part de la hauteur de la tête :
+`--bench-heights=head,0.9` vise la tête puis juste sous sa hitbox, à 1,76 m),
 `--bench-criterion` (`auto` | `mark` | `hit`), `--bench-truth`, `--bench-max-shots`, `--bench-mark-tolerance`, `--bench-settle`,
-`--bench-pause`, `--bench-out=<json>`, `--bench-fixed-speed=<m/s> --bench-passes=<N>` (N traversées à une seule vitesse → touches/N, plus stable que la recherche de la limite), `--bench-wait-client` (attend un client sans `--algo`). Menu Échap (map Stand de tir) : bouton **Benchmark tir
+`--bench-pause`, `--bench-out=<json>`, `--bench-fixed-speed=<m/s> --bench-passes=<N>` (N traversées à une seule vitesse → touches/N, plus stable que la recherche de la limite ; toutes les distances demandées sont jouées, même celles sans aucune touche), `--bench-wait-client` (attend un client sans `--algo`). Menu Échap (map Stand de tir) : bouton **Benchmark tir
 auto**, qui mesure l'algo en cours (ou toi à la souris) et affiche la fiche à la fin. Le mode
 `--bench-trigger` pose `AIMLABS_AUTOSTART=1` dans l'environnement de l'algo (démarre armé).
 

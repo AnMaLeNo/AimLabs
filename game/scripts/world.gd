@@ -4,12 +4,15 @@ extends Node3D
 ##   showcase : every Kingdom Archives agent standing in a line facing the spawn, every
 ##              weapon laid on the ground in front of them;
 ##   range    : shooting range — one chosen agent (neutral pose) moving along a chosen
-##              pattern (line / square / circle, see TargetMover) to test aim algorithms.
+##              pattern (line / square / circle, see TargetMover) to test aim algorithms;
+##   arena    : a row of walls with gaps; one agent appears from behind them at unpredictable
+##              times and places (peeks, crossings, pop-ups, see ScenarioDirector).
 
 signal targets_rebuilt(enemies: Array)
 signal map_changed(map: String)
 
-const MAPS: Array[String] = ["showcase", "range"]
+const MAPS: Array[String] = ["showcase", "range", "arena"]
+const ScenarioDirectorScript := preload("res://scripts/scenario_director.gd")
 
 @export var line_distance := 12.0  # metres in front of the spawn
 @export var agent_spacing := 2.0
@@ -31,6 +34,22 @@ var pattern_size := 4.0
 var pattern_speed := 2.0
 var target: Enemy
 var mover: TargetMover
+# Arena settings.
+const ARENA_WALLS := 3
+const ARENA_WALL_WIDTH := 3.0
+const ARENA_GAP := 2.0
+const ARENA_WALL_HEIGHT := 2.6
+const ARENA_WALL_THICKNESS := 0.3
+const ARENA_BEHIND := 1.0     # metres between the walls and the line the target moves on
+var scenario := "mix"         # peek | cross | popup | mix, or a comma-separated list
+var scenario_seed := -1       # < 0: different every run
+var director: Node
+var arena_targets := 1        # how many agents stand behind the walls (bench cases use several)
+var arena_directed := true    # false: no ScenarioDirector, the targets start hidden and wait to be driven (BenchCases)
+var arena_wall_ends: Array = []   # [x, side] of every wall end (side +1 = open space on the +x side)
+var targets: Array[Enemy] = []    # arena: every target, targets[0] == target
+## True when something of the world can hide a target (walls): visibility then needs line-of-sight tests.
+var has_occluders := false
 
 
 func _ready() -> void:
@@ -86,10 +105,12 @@ func set_range_distance(v: float) -> void:
 	range_distance = maxf(v, 1.0)
 	if mover:
 		mover.recentre(Vector3(0.0, 0.0, -range_distance))
+	if map == "arena":
+		_build_map()
 
 
 func _build_map() -> void:
-	for n in ["Enemies", "Weapons"]:
+	for n in ["Enemies", "Weapons", "Walls"]:
 		var old := get_node_or_null(n)
 		if old:
 			remove_child(old)
@@ -97,9 +118,15 @@ func _build_map() -> void:
 	enemies.clear()
 	target = null
 	mover = null
+	director = null
+	targets.clear()
+	arena_wall_ends = []
+	has_occluders = false
 	match map:
 		"range":
 			_build_range()
+		"arena":
+			_build_arena()
 		_:
 			_build_enemies()
 			_build_weapons()
@@ -124,6 +151,70 @@ func _build_range() -> void:
 	holder.add_child(target)
 	mover.configure(pattern, pattern_size, pattern_speed)
 	enemies.append(target)
+	targets_rebuilt.emit(enemies)
+
+
+## A row of walls at range_distance, and one agent behind them driven by a ScenarioDirector.
+func _build_arena() -> void:
+	var walls := Node3D.new()
+	walls.name = "Walls"
+	add_child(walls)
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.42, 0.44, 0.47)
+	mat.roughness = 0.9
+	var pitch := ARENA_WALL_WIDTH + ARENA_GAP
+	var edges := []           # [x, side]: side +1 = the open space is on the +x side of this wall end
+	for i in ARENA_WALLS:
+		var cx := (i - (ARENA_WALLS - 1) * 0.5) * pitch
+		var body := StaticBody3D.new()
+		body.name = "Wall_%d" % i
+		body.collision_layer = LAYER_WORLD
+		body.collision_mask = 0
+		body.position = Vector3(cx, ARENA_WALL_HEIGHT * 0.5, -range_distance)
+		var box := BoxShape3D.new()
+		box.size = Vector3(ARENA_WALL_WIDTH, ARENA_WALL_HEIGHT, ARENA_WALL_THICKNESS)
+		var shape := CollisionShape3D.new()
+		shape.shape = box
+		body.add_child(shape)
+		var mesh := BoxMesh.new()
+		mesh.size = box.size
+		mesh.material = mat
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		body.add_child(mi)
+		walls.add_child(body)
+		edges.append([cx - ARENA_WALL_WIDTH * 0.5, -1.0])
+		edges.append([cx + ARENA_WALL_WIDTH * 0.5, 1.0])
+	has_occluders = true
+	var holder := Node3D.new()
+	holder.name = "Enemies"
+	add_child(holder)
+	assets_missing = KAAssets.agent_slugs().is_empty()
+	arena_wall_ends = edges
+	var slugs: Array = [target_slug]
+	for s: String in ["sova", "viper", "reyna", "neon", "jett"]:      # the other targets are other agents (never « harbor »: broken model)
+		if not slugs.has(s) and KAAssets.agents().has(s):
+			slugs.append(s)
+	for k in arena_targets:
+		var e := Enemy.new()
+		var slug := String(slugs[k % slugs.size()])
+		e.name = "Target%d_%s" % [k, slug]
+		e.agent_slug = slug
+		e.neutral_pose = true
+		e.respawn_delay = 1.2
+		e.position = Vector3(0.0, 0.0, -(range_distance + ARENA_BEHIND + 0.7 * k))
+		if arena_directed and k == 0:
+			director = ScenarioDirectorScript.new()
+			director.name = "Director"
+			e.add_child(director)
+			# seen from the spawn, a wall end at x hides the target line up to x * (distance + behind) / distance
+			director.configure(scenario, scenario_seed, edges, (range_distance + ARENA_BEHIND) / range_distance, -(range_distance + ARENA_BEHIND))
+		else:
+			e.ready.connect(e.set_shown.bind(false))                 # waits hidden until something drives it
+		holder.add_child(e)
+		targets.append(e)
+		enemies.append(e)
+	target = targets[0]
 	targets_rebuilt.emit(enemies)
 
 

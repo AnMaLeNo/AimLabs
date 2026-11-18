@@ -46,12 +46,24 @@ var pitch_deg := 0.0
 var recoil_pending_deg := 0.0
 var fire_cooldown := 0.0
 var mouse_captured := false
+## Simulated player (Autopilot): only events tagged SYNTHETIC_DEVICE move the view or fire, and the OS cursor is not grabbed —
+## the real mouse of whoever sits at the PC cannot disturb a scripted run.
+const SYNTHETIC_DEVICE := 31
+var synthetic_only := false
+var synthetic_fire := false
 
 ## Pixels of look input received this frame, per source (for the HUD / bridge).
 var look_delta_this_frame := { LookSource.REAL: Vector2.ZERO, LookSource.ASSIST: Vector2.ZERO }
 var fire_requested_by_assist := false
 var assist_fire_lag_ms := 0.0  ## average delay between the assist FIRE command being applied and the shot being fired (EMA)
 var _assist_fire_request_usec := 0
+var last_fire_usec := 0  ## game clock (Time.get_ticks_usec) of the last shot, read when _fire() starts: BEFORE the ray and the effects (the shot's own instant)
+# Shot effects: the meshes and the materials are built once and kept. Built per shot, they were destroyed with the last impact
+# (8 s later) and rebuilt by the next one: 8 to 16 ms inside _fire() (measured 2026-11-16) — one frozen frame per missed shot,
+# and shot_fired emitted that much after the shot.
+var _impact_mesh: SphereMesh
+var _tracer_mesh: BoxMesh
+var _tracer_mat: StandardMaterial3D
 
 var _flash_timer := 0.0
 var _fire_held_last := false
@@ -66,6 +78,8 @@ func _ready() -> void:
 	yaw_deg = rad_to_deg(rotation.y)
 	viewmodel.setup(camera)
 	viewmodel.weapon_changed.connect(func(_slug: String, _name: String) -> void: muzzle_flash.visible = false)
+	_build_shot_effects()
+	_prewarm_shot_effects.call_deferred()
 
 
 ## Choose the first-person arms (Kingdom Archives agent slug, e.g. "jett").
@@ -80,6 +94,8 @@ func set_weapon(slug: String) -> bool:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and mouse_captured:
+		if synthetic_only and event.device != SYNTHETIC_DEVICE:
+			return
 		add_look_delta(event.relative, LookSource.REAL)
 	elif event.is_action_pressed("toggle_mouse"):
 		set_mouse_captured(not mouse_captured)
@@ -115,7 +131,7 @@ func set_mouse_captured(captured: bool) -> void:
 	if captured == mouse_captured:
 		return
 	mouse_captured = captured
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if captured else Input.MOUSE_MODE_VISIBLE
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if captured and not synthetic_only else Input.MOUSE_MODE_VISIBLE
 	mouse_capture_changed.emit(captured)
 
 
@@ -149,7 +165,7 @@ func _process(delta: float) -> void:
 
 	# Automatic weapons fire while the button is held, semi-automatic ones once per press
 	# (site AutomaticWeapon flag). Assist requests always count as one press.
-	var fire_held := mouse_captured and Input.is_action_pressed("fire")
+	var fire_held := mouse_captured and (synthetic_fire if synthetic_only else Input.is_action_pressed("fire"))
 	var human_fire := fire_held if viewmodel.automatic else (fire_held and not _fire_held_last)
 	_fire_held_last = fire_held
 	var wants_fire := human_fire or fire_requested_by_assist
@@ -182,6 +198,7 @@ func request_fire_from_assist() -> void:
 
 
 func _fire() -> void:
+	last_fire_usec = Time.get_ticks_usec()
 	var from := camera.global_position
 	var dir := -camera.global_transform.basis.z
 	var to := from + dir * max_range
@@ -242,37 +259,51 @@ func _spawn_tracer(from: Vector3, to: Vector3) -> void:
 	var length := from.distance_to(to)
 	if length < 0.2:
 		return
-	var mesh := BoxMesh.new()
-	mesh.size = Vector3(0.015, 0.015, length)
-	var mat := StandardMaterial3D.new()
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-	mat.albedo_color = Color(1.0, 0.85, 0.4, 0.9)
-	mesh.material = mat
+	var mat: StandardMaterial3D = _tracer_mat.duplicate()      # its own colour (it fades); same shader as the kept one
 	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
+	mi.mesh = _tracer_mesh
+	mi.material_override = mat
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	get_tree().current_scene.add_child(mi)
 	mi.global_position = (from + to) * 0.5
 	mi.look_at(to, Vector3.UP if absf(((to - from).normalized()).dot(Vector3.UP)) < 0.99 else Vector3.FORWARD)
+	mi.scale = Vector3(1.0, 1.0, length)                       # the kept mesh is 1 m long
 	var tween := mi.create_tween()
 	tween.tween_property(mat, "albedo_color:a", 0.0, 0.08)
 	tween.tween_callback(mi.queue_free)
 
 
-func _spawn_impact(point: Vector3, normal: Vector3) -> void:
-	var mesh := SphereMesh.new()
-	mesh.radius = 0.04
-	mesh.height = 0.08
-	mesh.radial_segments = 8
-	mesh.rings = 4
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.1, 0.1, 0.1)
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-	mesh.material = mat
+func _build_shot_effects() -> void:
+	_impact_mesh = SphereMesh.new()
+	_impact_mesh.radius = 0.04
+	_impact_mesh.height = 0.08
+	_impact_mesh.radial_segments = 8
+	_impact_mesh.rings = 4
+	var impact_mat := StandardMaterial3D.new()
+	impact_mat.albedo_color = Color(0.1, 0.1, 0.1)
+	impact_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_impact_mesh.material = impact_mat
+	_tracer_mesh = BoxMesh.new()
+	_tracer_mesh.size = Vector3(0.015, 0.015, 1.0)
+	_tracer_mat = StandardMaterial3D.new()
+	_tracer_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_tracer_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_tracer_mat.albedo_color = Color(1.0, 0.85, 0.4, 0.9)
+	_tracer_mesh.material = _tracer_mat
+
+
+## Draw both effects once at start, briefly, 3 m ahead: without this the first shot of a session froze one frame (12 ms
+## measured 2026-11-16) while the renderer prepared them.
+func _prewarm_shot_effects() -> void:
+	var p := camera.global_position - camera.global_transform.basis.z * 3.0
+	_spawn_tracer(p, p - camera.global_transform.basis.z)
+	_spawn_impact(p, Vector3.UP, 0.1)
+
+
+func _spawn_impact(point: Vector3, normal: Vector3, life := 8.0) -> void:
 	var mi := MeshInstance3D.new()
-	mi.mesh = mesh
+	mi.mesh = _impact_mesh
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	get_tree().current_scene.add_child(mi)
 	mi.global_position = point + normal * 0.01
-	get_tree().create_timer(8.0).timeout.connect(mi.queue_free)
+	get_tree().create_timer(life).timeout.connect(mi.queue_free)
