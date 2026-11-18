@@ -2,6 +2,7 @@ extends Node
 ## Detector training data: renders the plan written by tools/detector/gen_plan.py.
 ##
 ##   godot --path game --resolution 640x360 res://tools/gen_dataset.tscn -- --plan=<plan.json> --out=<dir> [--start=0] [--count=N]
+##         [--truth=<file.jsonl>] [--no-render] [--probe=N]
 ##
 ## One plan entry = one square crop of the game screen (the crop the sniper pipeline feeds to the network: the camera
 ## is the player's one with the field of view narrowed to the crop, so a pixel here is a pixel of the real screen).
@@ -12,6 +13,14 @@ extends Node
 ##   <id>_m<k>.png  one RGBA image per agent, that agent alone (only when the sample has 2+ agents): the visible part
 ##                of each one is found by subtracting the nearer agents
 ## The labels are not guessed from a model: they come from the alpha channel of these renders.
+##
+## --truth=<file.jsonl>: one JSON line per sample with what the ENGINE knows and no image shows: the camera, and for each
+##   agent its hit capsules in world space ([zone, ax, ay, az, bx, by, bz, radius], zone 0 = body, 1 = head, 2 = arm: the
+##   shapes player.gd ray-casts, built on the rest pose) and the world position of a few bones in the pose that is drawn
+##   (head, neck, nose, eyes, shoulders, …). tools/detector/head_truth.py turns that into « which pixels are a headshot ».
+## --no-render: write the truth only (no image; ~1000 samples/s): labels for a dataset that is already rendered.
+## --probe=N: with --truth, also ray-cast N random pixels per agent through the physics engine, exactly like a shot
+##   ("probe": [[px, py, zone or -1], …]) : checks the capsule arithmetic of head_truth.py against the game itself.
 
 const SLOT_BIT0 := 10  # render layer of agent slot k = bit (SLOT_BIT0 + k); layer 1 (bit 0) = everything
 
@@ -30,6 +39,17 @@ var _fg_sky: ProceduralSkyMaterial
 var _holder: Node3D
 var _cache := {}  # "slug|neutral" -> Enemy
 var _defaults := {}
+var _truth: FileAccess
+var _render_images := true
+var _probe := 0
+var _size := 480
+var _rng := RandomNumberGenerator.new()
+
+const TRUTH_BONES := ["Head", "Neck", "M_Nose", "M_Chin", "Jaw", "L_Eyeball", "R_Eyeball", "Spine3", "Pelvis", "L_Shoulder", "R_Shoulder", "L_Elbow", "R_Elbow",
+	"L_Hand", "R_Hand", "L_Hip", "R_Hip", "L_Knee", "R_Knee", "L_Foot", "R_Foot"]
+const ZONE_ID := {"body": 0, "head": 1, "arm": 2}
+## The newer rigs (clove, miks, tejo, waylay…) name their face bones differently: same point, other name. The truth always uses the first name.
+const BONE_ALT := {"M_Nose": ["C_OralLip_Up"], "M_Chin": ["C_Jaw_Edge"], "L_Eyeball": ["L_Eye_CS"], "R_Eyeball": ["R_Eye_CS"], "Jaw": ["Jaw_CS"]}
 
 
 func _ready() -> void:
@@ -52,7 +72,17 @@ func _ready() -> void:
 	var start := int(args.get("--start", 0))
 	var count := int(args.get("--count", _plan.size() - start))
 	_plan = _plan.slice(start, mini(start + count, _plan.size()))
-	_build_scene(int((parsed as Dictionary).get("size", 480)))
+	_size = int((parsed as Dictionary).get("size", 480))
+	_render_images = not args.has("--no-render")
+	_probe = int(args.get("--probe", 0))
+	_rng.seed = 12345
+	if args.has("--truth"):
+		_truth = FileAccess.open(String(args["--truth"]), FileAccess.WRITE)
+		if _truth == null:
+			printerr("gen_dataset: cannot write %s" % String(args["--truth"]))
+			get_tree().quit(2)
+			return
+	_build_scene(_size)
 	_run.call_deferred()
 
 
@@ -183,6 +213,8 @@ func _run() -> void:
 		if n % 100 == 0:
 			var el := (Time.get_ticks_msec() - t0) / 1000.0
 			print("gen_dataset: %d/%d  %.1f s  (%.1f samples/s)" % [n, _plan.size(), el, n / maxf(el, 0.001)])
+	if _truth != null:
+		_truth.close()
 	print("gen_dataset: DONE %d samples in %.1f s" % [n, (Time.get_ticks_msec() - t0) / 1000.0])
 	get_tree().quit()
 
@@ -209,6 +241,10 @@ func _do_sample(s: Dictionary) -> void:
 		for mi: MeshInstance3D in e._meshes:
 			mi.layers = 1 | (1 << (SLOT_BIT0 + k))
 		placed.append(e)
+	if _truth != null:
+		await _write_truth(s, placed)
+	if not _render_images:
+		return
 	var env: Dictionary = s.get("env", {})
 	var mode := String(s["mode"])
 	_cam.cull_mask = 1
@@ -232,3 +268,74 @@ func _do_sample(s: Dictionary) -> void:
 			_cam.cull_mask = 1
 		_ground.visible = true
 	_cam.environment = null
+
+
+func _v3(v: Vector3) -> Array:
+	return [snappedf(v.x, 0.00001), snappedf(v.y, 0.00001), snappedf(v.z, 0.00001)]
+
+
+## What the engine knows about this sample (see the header): camera, hit capsules, bones.
+func _write_truth(s: Dictionary, placed: Array[Enemy]) -> void:
+	var agents_out := []
+	if _probe > 0:
+		await get_tree().physics_frame  # the physics server sees the agents where this sample put them
+		await get_tree().physics_frame
+	for k in placed.size():
+		var e := placed[k]
+		var a: Dictionary = (s["agents"] as Array)[k]
+		var caps := []
+		for i in e._segments.size():
+			var seg: Array = e._segments[i]
+			var zone := String(e._hitboxes[i].get_meta("zone"))
+			var pa := e.to_global(seg[0])
+			var pb := e.to_global(seg[1])
+			caps.append([int(ZONE_ID.get(zone, 0))] + _v3(pa) + _v3(pb) + [float(seg[2])])
+		var bones := {}
+		if e._skeleton != null:
+			for bn: String in TRUTH_BONES:
+				var bi := e._skeleton.find_bone(bn)
+				for alt: String in BONE_ALT.get(bn, []):
+					if bi < 0:
+						bi = e._skeleton.find_bone(alt)
+				if bi >= 0:
+					bones[bn] = _v3(e._skeleton.global_transform * e._skeleton.get_bone_global_pose(bi).origin)
+		var d := {"slug": String(a["slug"]), "neutral": bool(a.get("neutral", true)), "caps": caps, "bones": bones}
+		if bones.has("Head"):
+			var hp := _cam.unproject_position(Vector3(bones["Head"][0], bones["Head"][1], bones["Head"][2]))
+			d["head_px"] = [snappedf(hp.x, 0.001), snappedf(hp.y, 0.001)]
+		if _probe > 0:
+			d["probe"] = _probe_agent(e, placed)
+		agents_out.append(d)
+	var cam: Dictionary = s["cam"]
+	_truth.store_line(JSON.stringify({"id": String(s["id"]), "size": _size, "cam": {"eye": float(cam["eye"]), "pitch_deg": float(cam["pitch_deg"]),
+		"fov": float(cam["fov"])}, "agents": agents_out}))
+
+
+## Real shots: N pixels drawn around the agent's head and body, ray-cast like player.gd does (nearest collider wins).
+func _probe_agent(e: Enemy, placed: Array[Enemy]) -> Array:
+	var out := []
+	var space := get_viewport().world_3d.direct_space_state
+	var head := _cam.unproject_position(e.head_position())
+	var feet := _cam.unproject_position(e.global_position)
+	var h := absf(feet.y - head.y)
+	for i in _probe:
+		var px := Vector2(head.x + _rng.randf_range(-0.25, 0.25) * h, head.y + _rng.randf_range(-0.2, 0.45 if i % 2 == 0 else 1.1) * h)
+		if px.x < 0.0 or px.y < 0.0 or px.x >= _size or px.y >= _size:
+			continue
+		var from := _cam.project_ray_origin(px)
+		var dir := _cam.project_ray_normal(px)
+		var exclude: Array[RID] = []
+		var zone := -1
+		for _try in 40:
+			var q := PhysicsRayQueryParameters3D.create(from, from + dir * 500.0, Enemy.LAYER_ENEMY_BODY | Enemy.LAYER_ENEMY_HEAD)
+			q.exclude = exclude
+			var r := space.intersect_ray(q)
+			if r.is_empty():
+				break
+			var col: Object = r["collider"]
+			if col.has_meta("enemy") and placed.has(col.get_meta("enemy")):
+				zone = int(ZONE_ID.get(String(col.get_meta("zone")), 0))
+				break
+			exclude.append(r["rid"])  # an agent of an earlier sample, hidden but still in the physics space
+		out.append([snappedf(px.x, 0.001), snappedf(px.y, 0.001), zone])
+	return out
