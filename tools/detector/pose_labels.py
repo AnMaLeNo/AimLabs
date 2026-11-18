@@ -107,16 +107,20 @@ def points(sample: dict, k: int, wall=None) -> np.ndarray:
     return pts
 
 
-def label_line(sample: dict, k: int, box, wall, size: int) -> Optional[str]:
-    """« 0 cx cy w h » + 20 × « x y v », normalisés. `box` = boîte visible (x1, y1, x2, y2) en pixels du carré."""
+def label_line(sample: dict, k: int, box, wall, size: int, off: int = 0) -> Optional[str]:
+    """« 0 cx cy w h » + 20 × « x y v », normalisés. `box` = boîte visible (x1, y1, x2, y2) en pixels du carré de côté `size`.
+    `off` : l'image est le carré central de côté `size`, qui commence au pixel `off` du rendu (--crop) ; `box` est déjà dans ce carré."""
     pts = points(sample, k, wall)
+    if off:
+        pts[:, :2] -= off
+        pts[(pts[:, 0] < 0) | (pts[:, 0] >= size) | (pts[:, 1] < 0) | (pts[:, 1] >= size)] = 0
     x1, y1, x2, y2 = box
     vals = [(x1 + x2) / 2 / size, (y1 + y2) / 2 / size, (x2 - x1) / size, (y2 - y1) / size]
     return "0 " + " ".join(f"{v:.5f}" for v in vals) + " " + " ".join(f"{p[0] / size:.5f} {p[1] / size:.5f} {int(p[2])}" for p in pts)
 
 
 def build(job):
-    src, dst, split, meta, tline, walls = job
+    src, dst, split, meta, tline, walls, crop, jq = job
     sid = meta["id"]
     sample = json.loads(tline) if tline else None
     size = sample["size"] if sample else 480
@@ -131,24 +135,36 @@ def build(job):
             if hi is not None:
                 wall = HT.pick_wall(rng, sample, who[0], hi)
         polys = []
-        if wall:
+        off = (size - crop) // 2 if crop else 0
+        if wall or crop:
             for l in open(f"{src}/labels/{split}/{sid}.txt").read().splitlines():
                 polys.append(np.array(l.split()[1:], np.float32).reshape(-1, 2) * size)
         for j, (k, b) in enumerate(zip(who, boxes)):
             box = b[:4]
-            if wall:
+            if wall or crop:                              # boîte de ce qui reste visible : hors du mur, et dans le carré central
                 m = np.zeros((size, size), np.uint8)
                 cv2.fillPoly(m, [np.round(polys[j]).astype(np.int32)], 1)
-                x0, y0, x1, y1 = [int(round(v)) for v in wall["rect"]]
-                m[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = 0
+                if wall:
+                    x0, y0, x1, y1 = [int(round(v)) for v in wall["rect"]]
+                    m[max(0, y0):max(0, y1), max(0, x0):max(0, x1)] = 0
+                if crop:
+                    m = m[off:off + crop, off:off + crop]
                 if int(m.sum()) < MIN_AREA:
                     continue
                 ys, xs = np.nonzero(m)
                 box = [float(xs.min()), float(ys.min()), float(xs.max() + 1), float(ys.max() + 1)]
                 if box[2] - box[0] < 3 or box[3] - box[1] < 3:
                     continue
-            lines.append(label_line(sample, k, box, wall, size))
-    if wall:
+            lines.append(label_line(sample, k, box, wall, crop or size, off))
+    if crop:                                              # carré central en pixels du rendu, JPEG de qualité tirée au hasard (la chaîne envoie du JPEG 60)
+        img = cv2.imread(img_src)
+        assert img.shape[0] == size, f"--crop attend les images à la taille du rendu ({size} px), pas {img.shape[0]}"
+        if wall:
+            img = HT.draw_wall(img, wall, size)
+        o = (size - crop) // 2
+        q = int(np.random.default_rng(zlib.crc32(("jpeg" + sid).encode())).integers(jq[0], jq[1] + 1)) if split == "train" else 60
+        cv2.imwrite(img_dst, img[o:o + crop, o:o + crop], [cv2.IMWRITE_JPEG_QUALITY, q])
+    elif wall:
         cv2.imwrite(img_dst, HT.draw_wall(cv2.imread(img_src), wall, size), [cv2.IMWRITE_JPEG_QUALITY, 95])
     else:
         try:
@@ -171,6 +187,9 @@ def main() -> None:
     ap.add_argument("--walls", type=float, default=0.25)
     ap.add_argument("--exclude", nargs="*", default=["veto"], help="personnages écartés : aucune image où ils apparaissent, même en figurant "
                     "(veto : modèle abîmé, il s'affiche blanc)")
+    ap.add_argument("--crop", type=int, default=0, help="ne garder que le carré CENTRAL de ce côté, en pixels du rendu, sans réduction (384 : ce que la chaîne capture à "
+                    "l'écran, donné tel quel au réseau). --src doit alors être le jeu à la taille du rendu (ds480). 0 : l'image entière, telle qu'elle est dans --src")
+    ap.add_argument("--jpeg", type=int, nargs=2, default=[45, 95], help="--crop : qualité JPEG des images d'entraînement, tirée entre ces deux bornes (validation et test : 60)")
     ap.add_argument("--workers", type=int, default=8)
     a = ap.parse_args()
     truth = {}
@@ -185,7 +204,7 @@ def main() -> None:
         if any(s in a.exclude for s in m.get("agents", [])):
             skipped += 1
             continue
-        jobs.append((a.src, a.dst, m["split"], m, truth.get(m["id"]), a.walls))
+        jobs.append((a.src, a.dst, m["split"], m, truth.get(m["id"]), a.walls, a.crop, tuple(a.jpeg)))
     for split in ("train", "val", "test"):
         os.makedirs(f"{a.dst}/images/{split}", exist_ok=True)
         os.makedirs(f"{a.dst}/labels/{split}", exist_ok=True)

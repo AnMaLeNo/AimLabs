@@ -44,7 +44,8 @@ import head_truth as HT  # noqa: E402
 from compose import draw_reticle  # noqa: E402
 
 VARIANTS = ["libre", "muret", "angle"]
-DIST_BINS = [(0, 10, "< 10 m"), (10, 20, "10–20 m"), (20, 40, "20–40 m"), (40, 1e9, "≥ 40 m")]
+# (le banc d'origine s'arrête à 60 m : sa dernière tranche s'appelait « ≥ 40 m » dans les résultats d'avant le 2026-11-18 ; au-delà : banc lointain, head_plan --dmin 60)
+DIST_BINS = [(0, 10, "< 10 m"), (10, 20, "10–20 m"), (20, 40, "20–40 m"), (40, 60.5, "40–60 m"), (60.5, 90, "60–90 m"), (90, 1e9, "≥ 90 m")]
 N = 256
 
 
@@ -84,7 +85,8 @@ def load_images(a, cases: List[dict]) -> np.ndarray:
     interp = {"nearest": cv2.INTER_NEAREST, "bilinear": cv2.INTER_LINEAR, "area": cv2.INTER_AREA}[a.interp]
     vs = [v for v in VARIANTS if any(c["variant"] == v for c in cases)]
     # (un fichier par jeu de variantes : `--variants libre` réécrivait sinon, en 4 minutes, le fichier des trois variantes, et inversement)
-    cache = os.path.splitext(a.truth)[0] + f".{a.interp}.{a.reticle}" + ("" if vs == VARIANTS else "." + "-".join(vs)) + ".npy"
+    cache = (os.path.splitext(a.truth)[0] + f".{a.interp}.{a.reticle}" + ("" if vs == VARIANTS else "." + "-".join(vs))
+             + ("" if N == 256 else f".n{N}") + ("" if a.zoom == 1.0 else f".z{a.zoom:g}") + ".npy")
     key = [c["id"] + c["variant"] for c in cases]
     if os.path.exists(cache) and os.path.exists(cache + ".json") and json.load(open(cache + ".json")) == key and not a.rebuild:
         return np.load(cache, mmap_mode="r")
@@ -94,7 +96,12 @@ def load_images(a, cases: List[dict]) -> np.ndarray:
         if c["id"] != last_id:
             last_id, base = c["id"], cv2.imread(f"{a.renders}/{c['id']}_c.png")
         img = HT.draw_wall(base, c["wall"], c["size"]) if c["wall"] else base
-        out[i] = cv2.resize(draw_reticle(img, c["size"], a.reticle), (N, N), interpolation=interp)
+        img = draw_reticle(img, c["size"], a.reticle)
+        if a.zoom != 1.0:                                    # le réseau ne reçoit que le carré central (côté / zoom) : moins de champ, plus de pixels sur la tête
+            side = int(round(c["size"] / a.zoom))
+            o = (c["size"] - side) // 2
+            img = img[o:o + side, o:o + side]
+        out[i] = img if img.shape[0] == N else cv2.resize(img, (N, N), interpolation=interp)
     out.flush()
     json.dump(key, open(cache + ".json", "w"))
     return out
@@ -194,20 +201,21 @@ class Acc:
                 "à_tort_corps": f(self.neg_yes_body, self.neg), "juste": f(self.pos_yes, yes)}
 
 
-def judge(case: dict, truth: dict, dets: list, conf: float, accs: List[Acc]) -> None:
-    k = N / case["size"]
+def judge(case: dict, truth: dict, dets: list, conf: float, accs: List[Acc], zoom: float = 1.0) -> None:
+    k = N * zoom / case["size"]                              # px du rendu -> px du réseau (autour du centre : le réticule reste au milieu)
+    half = case["size"] / 2.0
     dets = [d for d in dets if d[0] >= conf]
     hi = case["head"]
+    hit, err = False, None
     for acc in accs:
         acc.n += 1
     if hi is not None and hi["in_frac"] >= 0.5:
-        gx, gy = hi["cx"] * k, hi["cy"] * k
+        gx, gy = (hi["cx"] - half) * k + N / 2.0, (hi["cy"] - half) * k + N / 2.0
         cand = [d for d in dets if d[2] is not None and d[1][0] - 3 <= gx <= d[1][2] + 3 and d[1][1] - 3 <= gy <= d[1][3] + 3]
-        hit, err = False, None
         if cand:
             c = max(cand, key=lambda d: d[0])[2]
             err = float(np.hypot(c[0] - gx, c[1] - gy))
-            p = np.array([[c[0] / k, c[1] / k]])
+            p = np.array([[(c[0] - N / 2.0) / k + half, (c[1] - N / 2.0) / k + half]])
             z, w = HT.zones_at(truth, p)
             hit = bool(z[0] == HT.HEAD and w[0] == 0 and not (case["wall"] and HT.blocked(p, [case["wall"]["rect"]])[0]))
         for acc in accs:
@@ -218,6 +226,8 @@ def judge(case: dict, truth: dict, dets: list, conf: float, accs: List[Acc]) -> 
                 acc.err_r.append(err / (hi["r_px"] * k))
                 acc.aim += int(hit)
     says = any(d[3](N / 2.0, N / 2.0) for d in dets)
+    out = {"vis": hi is not None and hi["in_frac"] >= 0.5, "found": bool(hi is not None and hi["in_frac"] >= 0.5 and err is not None),
+           "hit": bool(hi is not None and hi["in_frac"] >= 0.5 and hit), "says": bool(says), "head_any": any(d[2] is not None for d in dets)}
     for acc in accs:
         if case["zone"] == HT.HEAD:
             acc.pos += 1
@@ -226,6 +236,7 @@ def judge(case: dict, truth: dict, dets: list, conf: float, accs: List[Acc]) -> 
             acc.neg += 1
             acc.neg_yes += int(says)
             acc.neg_yes_body += int(says and case["zone"] in (HT.BODY, HT.ARM))
+    return out
 
 
 def pct(v: float) -> str:
@@ -243,15 +254,20 @@ def main() -> None:
     ap.add_argument("--interp", default="nearest", choices=["nearest", "bilinear", "area"])
     ap.add_argument("--reticle", default="small", choices=["small", "classic", "dot", "none"],
                     help="réticule dessiné au centre (défaut : celui du jeu aujourd'hui ; « classic » : l'ancien, gros, qui cache une tête lointaine)")
+    ap.add_argument("--net", type=int, default=256, help="côté de l'image donnée au réseau (256 : la chaîne d'aujourd'hui, qui réduit le carré de 480 px de l'écran)")
+    ap.add_argument("--zoom", type=float, default=1.0, help="ne donner au réseau que le carré central de côté 480 / zoom (1,875 avec --net 256 : pixels de l'écran, sans réduction)")
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--limit", type=int, default=0)
     ap.add_argument("--variants", nargs="*", default=VARIANTS)
     ap.add_argument("--exclude", nargs="*", default=["veto"], help="personnages écartés du banc (veto : modèle abîmé, il s'affiche blanc)")
     ap.add_argument("--rebuild", action="store_true", help="recalculer le cache des cas (après un changement de head_truth.py)")
     ap.add_argument("--out", default="")
+    ap.add_argument("--cases-out", default="", help="écrit aussi le verdict cas par cas (tête trouvée, viser = tête, décision) : pour combiner plusieurs carrés (crop_study.py)")
     a = ap.parse_args()
     from ultralytics import YOLO
 
+    global N
+    N = a.net
     t0 = time.time()
     cases = [c for c in build_cases(a) if c["variant"] in a.variants]
     if a.limit:
@@ -269,14 +285,18 @@ def main() -> None:
         t1 = time.time()
         model = YOLO(path)
         accs: Dict[tuple, Acc] = {}
+        per_case = []
         for i in range(0, len(cases), a.batch):
             res = model.predict([np.ascontiguousarray(x) for x in imgs[i:i + a.batch]], imgsz=N, conf=min(a.conf, 0.25), classes=[0], verbose=False, device=0)
             for c, r in zip(cases[i:i + a.batch], res):
                 dbin = next(n for lo, hi, n in DIST_BINS if lo <= c["dist"] < hi)
                 keys = [(c["variant"], "toutes distances"), (c["variant"], dbin)]
-                judge(c, truth[c["id"]], KINDS[kind](r, params), a.conf, [accs.setdefault(k, Acc()) for k in keys])
+                v = judge(c, truth[c["id"]], KINDS[kind](r, params), a.conf, [accs.setdefault(k, Acc()) for k in keys], a.zoom)
+                per_case.append(dict(v, id=c["id"], variant=c["variant"], dist=c["dist"], on_head=c["zone"] == HT.HEAD))
         rows = {f"{v} · {d}": acc.row() for (v, d), acc in accs.items()}
         results[name] = {"kind": kind, "model": path, "params": params, "rows": rows}
+        if a.cases_out:
+            json.dump(per_case, open(a.cases_out.replace("{name}", name), "w", encoding="utf-8"))
         print(f"\n=== {name}  ({kind}, {os.path.basename(path)}{', ' + ', '.join(parts[2:]) if parts[2:] else ''})  — {time.time() - t1:.1f} s")
         print(f"{'':28s}{'têtes':>6s} {'trouvée':>8s} {'erreur px (méd / p90)':>22s} {'viser':>7s} │ {'sur tête':>8s} {'tire':>7s} {'hors tête':>9s} {'à tort':>7s} {'juste':>7s}")
         for v in a.variants:
